@@ -30,13 +30,18 @@ static int read_line(char *buf, int cap)
             return n;
         }
         if (ch == 0x7F || ch == 0x08) {
+            /* 按「一个 UTF-8 字符」退格, 否则删中文会剩下半个字节 */
             if (n > 0) {
-                n--;
-                fputs("\b \b", stdout);
+                do {
+                    n--;
+                    fputs("\b \b", stdout);
+                } while (n > 0 && ((unsigned char)buf[n] & 0xC0) == 0x80);
             }
             continue;
         }
-        if (ch >= 0x20 && ch < 0x7F && n < cap - 1) {
+        /* 接受 0x20 以上的全部字节 —— 含 UTF-8 多字节(中文星座名如「狮子座」)。
+         * 旧实现只放行 < 0x7F, 导致屏幕提示的 `sign 狮子座` 根本敲不进去。 */
+        if (ch >= 0x20 && ch != 0x7F && n < cap - 1) {
             buf[n++] = (char)ch;
             putchar(ch);
         }
@@ -52,7 +57,7 @@ static void print_banner(const app_cfg_t *cfg)
     printf(" 当前: ssid=%s mode=%s sign=%s\n",
            cfg->ssid[0] ? cfg->ssid : "(未设置)", cfg->sign_mode, cfg->sign);
     printf(" 命令:\n");
-    printf("   wifi <SSID> [密码]   保存 WiFi 并开始占卜\n");
+    printf("   wifi <SSID> [密码]   保存 WiFi 并开始占卜 (同一行用空格分隔)\n");
     printf("   sign <星座|random>   固定星座 / 每日抽签\n");
     printf("   show                 显示当前配置\n");
     printf("   forget               清除 WiFi (回到配网)\n");

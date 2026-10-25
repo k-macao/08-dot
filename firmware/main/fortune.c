@@ -398,8 +398,10 @@ void fortune_get(const char *sign_key, bool network_ok, fortune_t *out)
     if (now < 1600000000) {
         y = 2026; /* 时间未同步时给个稳定年份(种子用) */
     }
-    fortune_offline(sign_key, y, tm_v.tm_mon + 1, tm_v.tm_mday,
-                    (int)(now & 0xFFFF),
+    /* salt 固定为 0: 离线结果必须「同日期 + 同星座 = 同一张卡」。
+     * 旧实现用 (now & 0xFFFF) 作盐, 同一天不同时刻唤醒会换一套文案, 与
+     * fortune.h / README 承诺的确定性不符。 */
+    fortune_offline(sign_key, y, tm_v.tm_mon + 1, tm_v.tm_mday, 0,
                     network_ok ? "离线·降级" : "离线·无网", out);
     ESP_LOGW(TAG, "使用离线占卜引擎 (%s)", out->tag);
 }

@@ -9,6 +9,11 @@
 > | **① 纯固件 BIN（刷机）** | ESP-IDF 独立固件：设备自己联网取运势、16px 中文字库本地渲染、每天 07:00 自动更新，不依赖 Dot 云 | [`firmware/`](firmware/README.md) + CI 产物 `zhangyu-daily-bin` |
 > | **② 云端 Text API（免刷机）** | 按 dot_open_platform 开放接口每日把卡片推到设备 | 本文下方流水线 + GitHub Actions `daily-push` |
 
+> 固件路线可以在**不接硬件**的情况下自检排版：
+> `python3 firmware/tools/preview_card.py` 会把卡片渲染成 PNG，
+> `python3 firmware/tools/gen_font.py --check` 检查字库缺字；
+> 已修的显示问题清单见 [firmware/README.md](firmware/README.md#排版显示问题回归清单)。
+
 ```text
 [线上占星接口]  ──►  zhangyu 排版/降级/幂等  ──►  Dot 云 Text API  ──►  设备墨水屏
  v2.xxapi.cn ─┐          run_daily.py          /api/authV2/open/        Quote/0 152×296
