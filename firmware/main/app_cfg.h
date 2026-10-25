@@ -23,7 +23,7 @@ esp_err_t app_cfg_load(app_cfg_t *cfg);
 /** 保存到 NVS */
 esp_err_t app_cfg_save(const app_cfg_t *cfg);
 
-/** 清除 WiFi 与星座配置（回到配网模式） */
+/** 清除 WiFi 配置（回到配网模式）；星座设置保留 */
 esp_err_t app_cfg_forget(app_cfg_t *cfg);
 
 /** 每日唤醒计数 +1 并返回新值（NVS 持久化，用于时间未同步时的签名） */

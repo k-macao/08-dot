@@ -118,6 +118,27 @@ jobs:
           grep 'ZHANGYU_EPD' sdkconfig
           echo "::notice::$(grep -E 'CONFIG_ZHANGYU_WAKE_(HOUR|MINUTE)=' sdkconfig | tr '\n' ' ')"
 
+      # 主机端排版检查: 不需要 ESP-IDF/硬件
+      #   1) 字库覆盖 —— 卡片文案里每个汉字都必须在 font_gen.c 里有字形,
+      #      否则设备上画成空心方框(如 "摩羯座" 的 羯、"琥珀金" 的 珀琥)
+      #   2) 配网卡每行宽度 ≤ 144px, 避免出现拦腰断行
+      #   3) 用 gcc 把 fb.c/card.c 编进一个假墨水屏, 导出 PNG 供人眼复核
+      - name: Host layout checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd firmware
+          python3 tools/gen_font.py --check
+          python3 tools/preview_card.py --widths --max-width 144
+          python3 tools/preview_card.py            # → build/preview/*.png
+
+      - name: Upload card previews
+        uses: actions/upload-artifact@v4
+        with:
+          name: card-previews
+          path: firmware/build/preview/*.png
+          if-no-files-found: warn
+
       - name: Build
         shell: bash
         run: |

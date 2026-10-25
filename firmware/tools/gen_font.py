@@ -49,8 +49,13 @@ def charset() -> list[str]:
                 except UnicodeDecodeError:
                     continue
                 chars.add(ch)
-    # 码点不在 GB2312、但字体与排版需要的字符（排版分隔符等）
-    EXTRA = "·—"
+    # 码点不在 GB2312 一级字库、但卡片文案真的会用到的字符。
+    # 这些字必须显式加入，否则设备上会画成空心方框：
+    #   羯 —— 「摩羯座」(星座名, fortune.c kCn)
+    #   珀 琥 —— 「琥珀金」(离线引擎幸运色, fortune.c kColors)
+    #   黛 —— 「黛蓝」(离线引擎幸运色, fortune.c kColors)
+    # 排版分隔符: · (U+00B7)、— (U+2014)
+    EXTRA = "·—羯珀琥黛"
     chars.update(EXTRA)
     # 确保 GB2312 可编码（一级汉字之外的字符丢弃）；EXTRA 白名单除外
     out = []
@@ -174,12 +179,62 @@ extern const uint8_t  zg_font_bits[ZG_FONT_COUNT * 32];
     print(f"生成 {OUT_DIR / 'font_gen.h'}")
 
 
+SRC_DIR = HERE.parent / "main"
+
+
+def loaded_charset() -> set[str]:
+    """读取已生成的 font_gen.c 里的码点表 (设备实际可用字形)。"""
+    import re
+
+    src = OUT_DIR / "font_gen.c"
+    if not src.exists():
+        return set()
+    text = src.read_text(encoding="utf-8")
+    if "zg_font_cps" not in text:
+        return set()
+    body = text.split("zg_font_cps", 1)[1].split("};", 1)[0]
+    return {chr(int(m, 16)) for m in re.findall(r"0x([0-9A-Fa-f]{4})", body)}
+
+
+def check_sources() -> int:
+    """扫描 firmware/main/*.c 的字符串字面量, 报告字库里缺失的字符。
+
+    注释会被剔除（注释不出现在屏幕上），因此不会误报。
+    """
+    import re
+
+    # 以「已提交的字库」为准 (它是设备上真正渲染用的数据); 若尚未生成则退回
+    # charset() 的规划字符集。
+    have = loaded_charset() or set(charset())
+    missing: dict[str, set[str]] = {}
+    for path in sorted(SRC_DIR.glob("*.c")):
+        text = path.read_text(encoding="utf-8")
+        text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        text = re.sub(r"//[^\n]*", "", text)
+        for lit in re.findall(r'"((?:[^"\\\n]|\\.)*)"', text):
+            for ch in lit:
+                if ord(ch) > 0x7E and ch not in have:
+                    missing.setdefault(path.name, set()).add(ch)
+    if not missing:
+        print(f"字库覆盖检查通过 ({len(have)} 字, 源码字面量全部覆盖)")
+        return 0
+    for name, chars in missing.items():
+        print(f"✗ {name} 缺字: " + "".join(sorted(chars)) +
+              "  → 请把它们加入 gen_font.py 的 EXTRA 后重新生成")
+    return 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--font", help="本地 ttc/ttf 路径")
     ap.add_argument("--fetch", action="store_true", help="自动下载 wqy-microhei.ttc")
     ap.add_argument("--preview", help="打印样例字符点阵后退出")
+    ap.add_argument("--check", action="store_true",
+                    help="只检查固件文案是否有缺字(不需要 Pillow/字体文件)")
     args = ap.parse_args()
+
+    if args.check:
+        return check_sources()
 
     from PIL import ImageFont
 

@@ -90,6 +90,18 @@ static void delay_ms(uint32_t ms)
     vTaskDelay(pdMS_TO_TICKS(ms));
 }
 
+/**
+ * 打开面板电源。
+ * 注意: xxx_sleep() 会把 VIN 切成输入以彻底断电, 因此每次上电前都必须先恢复
+ * 输出方向, 否则 gpio_set_level() 对输入引脚无效 — 屏幕将不再刷新
+ * (典型场景: 串口配网卡 → 睡眠 → 同一次开机内再画运势卡)。
+ */
+static void panel_power_on(void)
+{
+    gpio_set_direction((gpio_num_t)s_cfg.pin_vin, GPIO_MODE_OUTPUT);
+    gpio_set_level((gpio_num_t)s_cfg.pin_vin, 1);
+}
+
 static esp_err_t write_byte(uint8_t value)
 {
     spi_transaction_t trans = {
@@ -325,7 +337,7 @@ esp_err_t uc8251d_init(const uc8251d_config_t *config)
     ret = gpio_config(&busy_conf);
     if (ret != ESP_OK) return ret;
 
-    gpio_set_level((gpio_num_t)s_cfg.pin_vin, 1);
+    panel_power_on();
     gpio_set_level((gpio_num_t)s_cfg.pin_cs, 1);
     gpio_set_level((gpio_num_t)s_cfg.pin_reset, 1);
     gpio_set_level((gpio_num_t)s_cfg.pin_dc, 1);
@@ -371,7 +383,7 @@ esp_err_t uc8251d_display(const uint8_t *data)
         return ESP_ERR_INVALID_STATE;
     }
 
-    gpio_set_level((gpio_num_t)s_cfg.pin_vin, 1);
+    panel_power_on();
     reset_panel();
     esp_err_t ret = wait_busy();
     if (ret != ESP_OK) return ret;
@@ -389,7 +401,7 @@ esp_err_t uc8251d_clear(bool white)
         return ESP_ERR_INVALID_STATE;
     }
 
-    gpio_set_level((gpio_num_t)s_cfg.pin_vin, 1);
+    panel_power_on();
     reset_panel();
     esp_err_t ret = wait_busy();
     if (ret != ESP_OK) return ret;

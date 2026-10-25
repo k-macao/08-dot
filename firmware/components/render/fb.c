@@ -171,30 +171,218 @@ int fb_text_width(const char *utf8)
     return w;
 }
 
+/* ------------------------------------------------------------------ */
+/* 折行内核 (fb_wrap_count 与 fb_draw_wrapped 共用同一套断点规则)        */
+/*                                                                     */
+/* 规则:                                                               */
+/*   - \n 强制换行;                                                    */
+/*   - 中日韩字符之间任意位置可断, ASCII 单词只在其后的空格处断,        */
+/*     避免 "USB" 被拆成 "US" / "B";                                   */
+/*   - 避头点: ，。、）」』 等不能落在行首 (断点前移 1 字, 绝不超宽);     */
+/*   - 避尾点: 「（《【 等不能落在行尾 (推到下一行)。                    */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    const char *end;   /* 本行结束位置 (已去掉行尾空格) */
+    const char *next;  /* 下一行起点 (已跳过空格与换行) */
+    int width;         /* 本行像素宽 */
+} line_seg_t;
+
+/* 不能出现在行首的字符 (避头点) */
+static bool no_line_start(uint32_t cp)
+{
+    switch (cp) {
+    case 0x3001: /* 、 */ case 0x3002: /* 。 */ case 0xFF0C: /* ， */
+    case 0xFF1B: /* ； */ case 0xFF1A: /* ： */ case 0xFF1F: /* ？ */
+    case 0xFF01: /* ！ */ case 0xFF09: /* ） */ case 0x3011: /* 】 */
+    case 0x300B: /* 》 */ case 0x300D: /* 」 */ case 0x300F: /* 』 */
+    case 0x3015: /* 〕 */ case 0x3017: /* 〕 */ case 0xFF3D: /* ］ */
+    case 0xFF5D: /* ｝ */ case 0x201D: /* ” */ case 0x2019: /* ’ */
+    case 0x2026: /* … */ case 0x00B7: /* · */ case 0x2030: /* ‰ */
+    case 0x2103: /* ℃ */ case 0xFF05: /* ％ */
+    case ',': case '.': case ';': case ':': case '!': case '?':
+    case ')': case ']': case '}': case '%':
+        return true;
+    default:
+        return false;
+    }
+}
+
+/* 不能出现在行尾的字符 (避尾点) */
+static bool no_line_end(uint32_t cp)
+{
+    switch (cp) {
+    case 0xFF08: /* （ */ case 0x3010: /* 【 */ case 0x300A: /* 《 */
+    case 0x300C: /* 「 */ case 0x300E: /* 『 */ case 0x3014: /* 〔 */
+    case 0x3016: /* 〔 */ case 0xFF3B: /* ［ */ case 0xFF5B: /* ｛ */
+    case 0x201C: /* “ */ case 0x2018: /* ‘ */
+    case '(': case '[': case '{':
+        return true;
+    default:
+        return false;
+    }
+}
+
+/* 宽字符 (CJK 等): 可在任意字符间断行 */
+static bool cp_is_wide(uint32_t cp)
+{
+    return cp >= 0x1100;
+}
+
+/* 计算 [s,e) 段像素宽 */
+static int seg_width(const char *s, const char *e)
+{
+    int w = 0;
+    const char *p = s;
+    while (p < e) {
+        uint32_t cp = fb_utf8_next(&p);
+        if (cp == 0) {
+            break;
+        }
+        w += fb_glyph_width(cp);
+    }
+    return w;
+}
+
+/* 取以 pos 结尾的上一字符的起始位置 */
+static const char *prev_char(const char *s, const char *pos)
+{
+    const char *p = s;
+    const char *last = s;
+    while (p < pos) {
+        last = p;
+        uint32_t cp = fb_utf8_next(&p);
+        if (cp == 0) {
+            break;
+        }
+    }
+    return (last < pos) ? last : s;
+}
+
+/* 从 s 切出一行。返回 false 表示已到结尾 */
+static bool line_split(const char *s, int max_w, line_seg_t *seg)
+{
+    if (!s || !*s) {
+        return false;
+    }
+    if (max_w < 1) {
+        max_w = 1;
+    }
+    if (*s == '\n') { /* 空行 */
+        seg->end = s;
+        seg->next = s + 1;
+        seg->width = 0;
+        return true;
+    }
+
+    const char *p = s;
+    const char *hard = NULL;  /* 放不下时当前字符的起点 (硬断) */
+    const char *soft = NULL;  /* 最近的合法断点 (软断) */
+    int soft_w = 0;
+    int width = 0;
+
+    while (*p) {
+        const char *cs = p;
+        uint32_t cp = fb_utf8_next(&p);
+        if (cp == '\n') {
+            seg->end = cs;
+            seg->next = p;
+            seg->width = width;
+            return true;
+        }
+        int gw = fb_glyph_width(cp);
+        if (width + gw > max_w && width > 0) {
+            hard = cs;
+            break;
+        }
+        width += gw;
+        if (cp == ' ' || cp_is_wide(cp)) {
+            soft = p; /* 断在空格/宽字符之后 */
+            soft_w = width;
+        }
+    }
+
+    /* 整段放得下 */
+    if (!*p && !hard) {
+        seg->end = p;
+        seg->next = p;
+        seg->width = width;
+        return true;
+    }
+
+    const char *end = (soft && soft > s) ? soft : hard;
+    if (!end) {
+        end = p;
+    }
+    int end_w = (soft && soft > s) ? soft_w : width;
+
+    /* 避头点: 断点后的标点是标点 → 断点前移一个字, 让标点跟上一字同行。
+     * 不能用「把标点回拉到本行」的做法: 那会超出 max_w, 画出右边距外被裁掉。 */
+    for (int guard = 0; guard < 3 && end > s; guard++) {
+        const char *q = end;
+        uint32_t cp = fb_utf8_next(&q);
+        if (cp == 0 || cp == '\n' || !no_line_start(cp)) {
+            break;
+        }
+        const char *prev = prev_char(s, end);
+        if (prev <= s) {
+            break; /* 行内只剩一个字, 让它带标点一起超一点点 */
+        }
+        end = prev;
+        end_w = seg_width(s, end);
+    }
+    /* 避尾点: 行末的开启标点推到下一行 */
+    while (end > s) {
+        const char *pc = prev_char(s, end);
+        const char *q = pc;
+        uint32_t cp = fb_utf8_next(&q);
+        if (!no_line_end(cp)) {
+            break;
+        }
+        end_w -= fb_glyph_width(cp);
+        end = pc;
+    }
+    /* 去掉行尾空格 */
+    while (end > s && end[-1] == ' ') {
+        end--;
+    }
+    if (end <= s) { /* 兜底: 至少推进一个字符, 防止死循环 */
+        end = s;
+        fb_utf8_next(&end);
+        end_w = fb_glyph_width((uint32_t)(unsigned char)*s);
+    }
+
+    const char *next = end;
+    while (*next == ' ') {
+        next++;
+    }
+    if (*next == '\n') {
+        next++;
+    }
+    if (next <= s) {
+        next = end + 1;
+    }
+
+    seg->end = end;
+    seg->next = next;
+    seg->width = end_w;
+    return true;
+}
+
 int fb_wrap_count(const char *utf8, int max_w)
 {
     if (!utf8 || !*utf8) {
         return 0;
     }
     int lines = 0;
-    int cx = 0;
     const char *p = utf8;
-    uint32_t cp;
-    while ((cp = fb_utf8_next(&p)) != 0) {
-        if (cp == '\n') {
-            lines++;
-            cx = 0;
-            continue;
+    line_seg_t seg;
+    while (*p && lines < 256) {
+        if (!line_split(p, max_w, &seg)) {
+            break;
         }
-        int w = fb_glyph_width(cp);
-        if (cx + w > max_w && cx > 0) {
-            lines++;
-            cx = 0;
-        }
-        cx += w;
-    }
-    if (cx > 0) {
         lines++;
+        p = seg.next;
     }
     return lines;
 }
@@ -213,36 +401,7 @@ int fb_draw_line(fb_t *f, int x, int y, const char *utf8, bool bold)
     return x - start_x;
 }
 
-static int draw_segment(fb_t *f, int x, int y, const char *s, const char *e,
-                        bool bold)
-{
-    const char *p = s;
-    int start = x;
-    while (p < e) {
-        uint32_t cp = fb_utf8_next(&p);
-        if (cp == 0) {
-            break;
-        }
-        x += draw_one(f, x, y, cp, bold);
-    }
-    return x - start;
-}
-
-static int seg_width(const char *s, const char *e)
-{
-    int w = 0;
-    const char *p = s;
-    while (p < e) {
-        uint32_t cp = fb_utf8_next(&p);
-        if (cp == 0) {
-            break;
-        }
-        w += fb_glyph_width(cp);
-    }
-    return w;
-}
-
-/* 绘制 [s,e) 段；center 为真时在 [x, x+max_w) 内居中 */
+/* 绘制 [s,e) 段; center 为真时在 [x, x+max_w) 内居中 */
 static void emit_segment(fb_t *f, int x, int y, int max_w, const char *s,
                          const char *e, bool bold, bool center)
 {
@@ -254,7 +413,14 @@ static void emit_segment(fb_t *f, int x, int y, int max_w, const char *s,
     if (center && seg_w < max_w) {
         lx = x + (max_w - seg_w) / 2;
     }
-    draw_segment(f, lx, y, s, e, bold);
+    const char *p = s;
+    while (p < e) {
+        uint32_t cp = fb_utf8_next(&p);
+        if (cp == 0) {
+            break;
+        }
+        lx += draw_one(f, lx, y, cp, bold);
+    }
 }
 
 int fb_draw_wrapped(fb_t *f, int x, int y, int max_w, const char *utf8,
@@ -264,65 +430,16 @@ int fb_draw_wrapped(fb_t *f, int x, int y, int max_w, const char *utf8,
         return 0;
     }
     int lines = 0;
-    int cx = 0;
-    const char *line_start = utf8;
-    const char *cur = utf8;
-    const char *next = utf8;
-    const char *ws_end = NULL; /* 当前行内最近空格之后的位置 */
-    bool run_ascii = true;     /* 空格后的连续片段是否纯 ASCII(整词) */
-
-    while (*next) {
-        cur = next;
-        const char *p = cur;
-        uint32_t cp = fb_utf8_next(&p);
-        next = p;
-        if (cp == '\n') {
-            if (lines >= max_lines) {
-                return lines;
-            }
-            emit_segment(f, x, y + lines * FB_LINE_H, max_w, line_start, cur,
-                         bold, center);
-            lines++;
-            line_start = next;
-            cx = 0;
-            ws_end = NULL;
-            run_ascii = true;
-            continue;
+    const char *p = utf8;
+    line_seg_t seg;
+    while (*p && lines < max_lines) {
+        if (!line_split(p, max_w, &seg)) {
+            break;
         }
-        int w = fb_glyph_width(cp);
-        if (cx + w > max_w && cx > 0) {
-            if (lines >= max_lines) {
-                return lines;
-            }
-            /* 优先在空格处断开整词, 避免 ASCII 单词被拦腰截断 */
-            const char *brk = cur;
-            if (ws_end && ws_end > line_start && run_ascii) {
-                brk = ws_end;
-            }
-            emit_segment(f, x, y + lines * FB_LINE_H, max_w, line_start, brk,
-                         bold, center);
-            lines++;
-            line_start = brk;
-            cx = seg_width(line_start, next);
-            ws_end = (cp == ' ') ? next : NULL;
-            run_ascii = cp < 0x80;
-            if (cx > max_w) {
-                cx = max_w; /* 超长词: 后续按字符硬折 */
-            }
-            continue;
-        }
-        cx += w;
-        if (cp == ' ') {
-            ws_end = next;
-            run_ascii = true;
-        } else if (cp >= 0x80) {
-            run_ascii = false;
-        }
-    }
-    if (line_start < next && lines < max_lines) {
-        emit_segment(f, x, y + lines * FB_LINE_H, max_w, line_start, next,
-                     bold, center);
+        emit_segment(f, x, y + lines * FB_LINE_H, max_w, p, seg.end, bold,
+                     center);
         lines++;
+        p = seg.next;
     }
     return lines;
 }

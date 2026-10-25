@@ -3,7 +3,7 @@
  * @brief 章鱼AI.每日占一占 — 固件主流程
  *
  * 启动 → (未配置则进串口配网) → 联网 → SNTP 校时 → 拉取每日运势
- *      → 墨水屏渲染卡片 → 深度休眠至次日 08:30 再次唤醒
+ *      → 墨水屏渲染卡片 → 深度休眠至下一个唤醒时刻 (默认 07:00)
  *
  * 安全约定 (见 dot_open_platform 自定义固件指南):
  *   - 每次深度休眠前必定设置唤醒定时器, 绝不“无唤醒源休眠”
@@ -49,9 +49,12 @@ static void date_line_build(char *out, size_t cap, int wake_no)
     localtime_r(&now, &t);
     int year = t.tm_year + 1900;
     if (now > TIME_VALID_TS && year >= 2024 && year <= 2100) {
-        static const char kWeek[] = "日一二三四五六"; /* 每字 3 字节 */
+        /* 星期必须单独取一个字: 旧写法 kWeek + 3*wday 会把「周一」变成整串
+         * 「周一三四五六」(C 字符串没有长度截断) */
+        static const char *const kWeek[7] = {"日", "一", "二", "三",
+                                             "四", "五", "六"};
         snprintf(out, cap, "%d月%d日 周%s", t.tm_mon + 1, t.tm_mday,
-                 kWeek + 3 * t.tm_wday);
+                 kWeek[t.tm_wday >= 0 && t.tm_wday < 7 ? t.tm_wday : 0]);
     } else {
         snprintf(out, cap, "章鱼AI 第%d占", wake_no);
     }
@@ -59,7 +62,7 @@ static void date_line_build(char *out, size_t cap, int wake_no)
 
 /**
  * 深度休眠。
- *   success=true  → 睡到下一个配置时刻 (默认 08:30)
+ *   success=true  → 睡到下一个配置时刻 (Kconfig 默认 07:00)
  *   success=false → 12 小时后重试 (网络故障时不空等一整天)
  */
 static void go_sleep(bool success)

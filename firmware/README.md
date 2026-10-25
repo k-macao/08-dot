@@ -67,6 +67,9 @@ zhangyu> show / forget / help / go
 之后每天 **07:00** 自动：联网 → 取运势 → 渲染 → 休眠。
 配置存 NVS，断电不丢；`forget` 清除 WiFi 回到配网模式。
 
+> 提示：屏幕上的配网卡文案已按 152px 实测排版（每行 ≤ 144px），
+> 看到的是「输入 wifi 名称 密码」这样完整的一行，不会再出现拦腰断行。
+
 ### WiFi 由 GitHub 预设（推荐，免串口）
 
 CI 构建时自动读取仓库的 Actions 配置并烧入固件。**约定：条目的
@@ -99,6 +102,20 @@ name = WiFi 名称（SSID），value = 密码**：
 
 CI 用 workflow input `edition=early` 切换；本地用 `idf.py menuconfig`。
 
+## 不接硬件也能看卡片效果（排版自检）
+
+`tools/preview_card.py` 用系统 gcc 把 `components/render/fb.c` + `font_gen.c` +
+`main/card.c` 编进一个「假墨水屏」，直接导出 PNG —— 排版就是设备上的真实排版：
+
+```bash
+python3 firmware/tools/preview_card.py          # → firmware/build/preview/*.png
+python3 firmware/tools/preview_card.py --widths # 改文案前先量字宽（正文 144px）
+python3 firmware/tools/gen_font.py --check      # 卡片文案里有没有字库缺字
+```
+
+四张图分别覆盖：配网卡 / 中文运势卡 / 英文备用源（按词折行）/ 离线兜底卡。
+CI 每次构固件前都会跑一遍这两项检查，并把 PNG 作为 `card-previews` 产物上传。
+
 ## 目录结构
 
 ```text
@@ -115,13 +132,33 @@ firmware/
 ├── components/
 │   ├── epd/              # UC8251D / UC8151 驱动 (Apache-2.0, 来自 dot_open_platform)
 │   └── render/           # 帧缓冲 + UTF-8 排版 + font_gen.c (4040 字 16px)
-└── tools/gen_font.py     # 字库生成 (文泉驿微米黑, Apache-2.0/GPLv3)
+└── tools/
+    ├── gen_font.py       # 字库生成 (文泉驿微米黑, Apache-2.0/GPLv3) + --check 缺字检查
+    └── preview_card.py   # 主机端把卡片渲染成 PNG (gcc, 无需 ESP-IDF/硬件)
 ```
 
 ## 与云端方案的关系
 
 `zhangyu/` Python 目录是另一条路线：**不刷机**，通过 Dot 开放平台 Text API
 每日推送内容到设备（见根目录 README）。本目录是“纯固件”路线，二者可并存。
+
+## 排版/显示问题回归清单
+
+以下问题已修复，改代码时别改回去（CI 的 `Host layout checks` 会盯着前两条）：
+
+| 问题 | 症状 | 现在 |
+| --- | --- | --- |
+| 折行不认 CJK 边界 | 「连接 USB 后打开串 / 口终端」把词拦腰截断 | 按字符边界断行，ASCII 单词整体换行，标点不落行首 |
+| 避头点回拉超宽 | 行末标点被推到右边距外，屏上「看不见」 | 断点前移一个字，绝不超出 144px |
+| 截断留半句 | 正文尾部出现半个字/孤立逗号 | 逐字试算「前缀 + …」，优先断在句读处 |
+| 幸运栏断在词中 | 「幸运 草绿 17 · 贵 / 人 白羊座」 | 显式换成「幸运 草绿 17」「贵人 白羊座」两行 |
+| 配网卡文案过长 | 每行都被折成两行，整屏都是断句 | 文案重写并按实测字宽排布 |
+| 字库缺字 | 「摩羯座」「琥珀金」「黛蓝」画成空心方框 | 4 字补进字库（4044 字），`gen_font.py --check` 把关 |
+| 星期显示错乱 | 周一显示成「周一三四五六」 | 按 wday 取单个汉字 |
+| 第二次上屏空白 | 配网卡之后画运势卡，屏幕不刷新 | 每次上屏前恢复 VIN 引脚输出方向（sleep 把它切成了输入） |
+| 串口敲不进中文 | 屏幕提示 `sign 狮子座`，输入被吞 | 串口读入接受 UTF-8 多字节，退格按整字删除 |
+| NVS 读串用未初始化长度 | 配置随机读失败/写穿缓冲 | 每次调用前把长度重置为缓冲区容量 |
+| 离线结果不稳定 | 同一天不同时刻结果不同 | 盐值固定为 0，同日期 + 同星座 = 同一张卡 |
 
 ## 安全提示（摘自官方指南）
 

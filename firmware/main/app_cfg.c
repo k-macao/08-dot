@@ -13,30 +13,47 @@
 static const char *TAG = "app_cfg";
 static const char *NS = "zhangyu";
 
+/**
+ * 读一个字符串键。
+ * nvs_get_str() 的 length 是「入参=缓冲区大小, 出参=实际长度」；旧代码复用
+ * 同一个未初始化的 size_t, 首次调用即把随机值当容量传入 —— 可能写穿缓冲区,
+ * 也可能让后续键全部读失败。这里每次调用前重置为数组容量。
+ */
+static void load_str(nvs_handle_t h, const char *key, char *dst, size_t cap)
+{
+    if (cap == 0) {
+        return;
+    }
+    size_t len = cap;
+    if (nvs_get_str(h, key, dst, &len) != ESP_OK) {
+        dst[0] = 0;
+    }
+    dst[cap - 1] = 0;
+}
+
 esp_err_t app_cfg_load(app_cfg_t *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
     nvs_handle_t h;
     esp_err_t err = nvs_open(NS, NVS_READONLY, &h);
     if (err == ESP_OK) {
-        size_t n;
-        nvs_get_str(h, "ssid", cfg->ssid, &n);
-        nvs_get_str(h, "pass", cfg->pass, &n);
-        nvs_get_str(h, "smode", cfg->sign_mode, &n);
-        nvs_get_str(h, "sign", cfg->sign, &n);
+        load_str(h, "ssid", cfg->ssid, sizeof(cfg->ssid));
+        load_str(h, "pass", cfg->pass, sizeof(cfg->pass));
+        load_str(h, "smode", cfg->sign_mode, sizeof(cfg->sign_mode));
+        load_str(h, "sign", cfg->sign, sizeof(cfg->sign));
         nvs_close(h);
     }
 
     /* menuconfig 默认值播种（CI 构建时可直接烧入 WiFi） */
     if (cfg->ssid[0] == 0 && CONFIG_ZHANGYU_WIFI_SSID[0] != 0) {
-        strncpy(cfg->ssid, CONFIG_ZHANGYU_WIFI_SSID, sizeof(cfg->ssid) - 1);
-        strncpy(cfg->pass, CONFIG_ZHANGYU_WIFI_PASSWORD, sizeof(cfg->pass) - 1);
+        snprintf(cfg->ssid, sizeof(cfg->ssid), "%s", CONFIG_ZHANGYU_WIFI_SSID);
+        snprintf(cfg->pass, sizeof(cfg->pass), "%s", CONFIG_ZHANGYU_WIFI_PASSWORD);
         app_cfg_save(cfg);
         ESP_LOGI(TAG, "已从 menuconfig 播种 WiFi 配置");
     }
     if (cfg->sign_mode[0] == 0) {
-        strncpy(cfg->sign_mode, CONFIG_ZHANGYU_SIGN_MODE, sizeof(cfg->sign_mode) - 1);
-        strncpy(cfg->sign, CONFIG_ZHANGYU_SIGN, sizeof(cfg->sign) - 1);
+        snprintf(cfg->sign_mode, sizeof(cfg->sign_mode), "%s", CONFIG_ZHANGYU_SIGN_MODE);
+        snprintf(cfg->sign, sizeof(cfg->sign), "%s", CONFIG_ZHANGYU_SIGN);
     }
     ESP_LOGI(TAG, "配置: ssid=%s mode=%s sign=%s",
              cfg->ssid[0] ? cfg->ssid : "(未设置)", cfg->sign_mode, cfg->sign);
