@@ -1,0 +1,2 @@
+# 章鱼AI.每日占一占 — 零第三方依赖，仅需 Python 3.9+
+# （如系统缺少时区数据：apt-get install tzdata）

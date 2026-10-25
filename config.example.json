@@ -1,0 +1,18 @@
+{
+  "device_id": "YOUR_DEVICE_SERIAL_NUMBER",
+  "title": "章鱼AI.每日占一占",
+  "brand": "章鱼AI",
+  "sign_mode": "random",
+  "sign": "aries",
+  "style": "brief",
+  "max_chars": 90,
+  "task_type": "loop",
+  "task_key": null,
+  "task_alias": "章鱼AI.每日占一占",
+  "refresh_now": true,
+  "providers": ["xxapi", "freehoroscope", "offline"],
+  "icon_url": null,
+  "nfc_link": null,
+  "timezone": "Asia/Macau",
+  "state_file": "data/state.json"
+}
