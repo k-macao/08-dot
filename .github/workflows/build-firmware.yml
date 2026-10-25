@@ -30,27 +30,30 @@ jobs:
         uses: actions/checkout@v4
 
       # 发现 WiFi 预设 — 约定: 条目 name = WiFi 名称(SSID), value = 密码
+      # 不走 API(GITHUB_TOKEN 无权访问配置端点), 直接用表达式 toJson(vars)/toJson(secrets)
       - name: Discover WiFi preset
         id: wifi
         shell: bash
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          ALL_VARS: ${{ toJson(vars) }}
+          ALL_SECRETS: ${{ toJson(secrets) }}
         run: |
           python3 - <<'PY'
-          import json, os, urllib.request
+          import json, os
 
-          API = f"{os.environ['GITHUB_API_URL']}/repos/{os.environ['GITHUB_REPOSITORY']}/actions"
-          TOKEN = os.environ["GITHUB_TOKEN"]
+          def load(raw):
+              raw = (raw or "").strip()
+              if not raw:
+                  return {}
+              try:
+                  d = json.loads(raw)
+                  return d if isinstance(d, dict) else {}
+              except Exception:
+                  print("::warning::JSON 解析失败: " + raw[:120])
+                  return {}
 
-          def fetch(path):
-              req = urllib.request.Request(
-                  API + path,
-                  headers={"Authorization": f"Bearer {TOKEN}",
-                           "Accept": "application/vnd.github+json",
-                           "User-Agent": "wifi-discover"},
-              )
-              with urllib.request.urlopen(req, timeout=20) as r:
-                  return json.load(r)
+          variables = load(os.environ.get("ALL_VARS"))
+          secrets_map = load(os.environ.get("ALL_SECRETS"))
 
           RESERVED = {"WIFI_SSID", "WIFI_PASSWORD", "ZHANGYU_WIFI_SSID",
                       "ZHANGYU_WIFI_PASSWORD", "ZHANGYU_SIGN", "ZHANGYU_STYLE",
@@ -59,46 +62,49 @@ jobs:
           def reserved(n):
               return n in RESERVED or n.startswith(("WIFI_", "ZHANGYU_", "DOT_"))
 
-          try:
-              variables = [(v["name"], v.get("value") or "")
-                           for v in fetch("/variables?per_page=100").get("variables", [])]
-          except Exception as e:
-              print(f"::warning::读取 Variables 失败: {e}")
-              variables = []
-          try:
-              secret_names = [s["name"] for s in fetch("/secrets?per_page=100").get("secrets", [])]
-          except Exception as e:
-              print(f"::warning::读取 Secrets 名称失败: {e}")
-              secret_names = []
+          def nonempty(v):
+              return isinstance(v, str) and v != ""
 
-          # 1) 兼容固定命名: WIFI_SSID / ZHANGYU_WIFI_SSID (value = SSID, WIFI_PASSWORD = 密码)
-          fixed = dict(variables)
-          ssid = fixed.get("WIFI_SSID") or fixed.get("ZHANGYU_WIFI_SSID") or ""
-          pw = fixed.get("WIFI_PASSWORD") or fixed.get("ZHANGYU_WIFI_PASSWORD") or ""
-          sec = ""
-          # 2) 约定命名(Variables): name = WiFi 名, value = 密码
+          ssid = pw = src = ""
+
+          # 1) 兼容固定命名 (value = SSID): WIFI_SSID / ZHANGYU_WIFI_SSID
+          ssid = variables.get("WIFI_SSID") or variables.get("ZHANGYU_WIFI_SSID") or ""
+          pw = variables.get("WIFI_PASSWORD") or variables.get("ZHANGYU_WIFI_PASSWORD") or ""
+          if ssid:
+              src = "Variable(WIFI_SSID 固定命名)"
+
+          # 2) 约定命名 Variables: name = WiFi 名, value = 密码
           if not ssid:
-              cand = sorted((n, v) for n, v in variables if not reserved(n))
+              cand = sorted((n, v) for n, v in variables.items() if not reserved(n))
               if len(cand) > 1:
                   print("::notice::发现多个疑似 WiFi 变量: " +
                         ", ".join(n for n, _ in cand) + " — 取字母序第一个")
               if cand:
                   ssid, pw = cand[0]
-          # 3) 约定命名(Secrets): name = WiFi 名, 密码稍后由 secrets[...] 动态读取
+                  src = "Variable(name=WiFi名)"
+
+          # 3) 约定命名 Secrets: name = WiFi 名, value = 密码
           if not ssid:
-              cand_s = sorted(n for n in secret_names if not reserved(n))
+              cand_s = sorted(n for n in secrets_map if not reserved(n))
+              usable = [(n, secrets_map[n]) for n in cand_s if nonempty(secrets_map[n])]
               if len(cand_s) > 1:
                   print("::notice::发现多个疑似 WiFi Secret: " +
                         ", ".join(cand_s) + " — 取字母序第一个")
-              if cand_s:
-                  sec = cand_s[0]
-                  ssid = sec
+              if usable:
+                  ssid, pw = usable[0]
+                  src = "Secret(name=WiFi名)"
+              elif cand_s:
+                  print("::notice::Secrets 中发现 %s 但其 value 未能经表达式读出, "
+                        "请改放到 Variables (name=WiFi名, value=密码)" % cand_s[0])
+
+          # Secrets 路径若 toJson 读不出值 → 输出 name 供注入步骤 secrets[...] 动态回退
+          sec_fallback = ssid if (src == "Secret(name=WiFi名)" and not pw) else ""
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
-              f.write(f"ssid={ssid}\npass={pw}\nsecret_name={sec}\n")
+              f.write(f"ssid={ssid}\npass={pw}\nsource={src}\nsecret_name={sec_fallback}\n")
           if ssid:
-              src = "Secret(name=SSID, 密码动态读取)" if (sec and not pw) else "Variable(name=SSID, value=密码)"
-              print(f"已发现 WiFi 预设: SSID={ssid}  来源={src}")
+              print(f"已发现 WiFi 预设: SSID={ssid}  来源={src}  "
+                    f"密码={'已读取(不回显)' if pw else '空'}")
           else:
               print("未发现 WiFi 预设 — 固件将走串口配网")
           PY
