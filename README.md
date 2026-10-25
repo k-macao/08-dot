@@ -132,7 +132,8 @@ python3 run_daily.py push --sign libra      # 指定天秤座（本次）
 python3 run_daily.py push --sign random     # 指定每日抽签
 python3 run_daily.py push --style full      # 完整四段式
 python3 run_daily.py push --force           # 忽略当天幂等，强制重推
-python3 run_daily.py push --show-payload    # 打印请求体
+python3 run_daily.py push --show-payload    # 打印请求体（凭据缺失时也会打印）
+python3 run_daily.py push --dry-run --show-payload   # 只看排版+请求体，无需任何凭据
 python3 run_daily.py push --provider xxapi  # 只用某个数据源
 python3 run_daily.py signs                  # 列出全部星座写法
 ```
@@ -148,9 +149,23 @@ python3 run_daily.py signs                  # 列出全部星座写法
 
 | 名称 | 类型 | 值 |
 | --- | --- | --- |
-| `DOT_API_KEY` | Secret | Dot. App 导出的 API Key |
-| `DOT_DEVICE_ID` | Secret | 设备序列号 |
+| `DOT_API_KEY` | **Secret**（只放 Secret） | Dot. App 导出的 API Key，形如 `dot_app_xxx` |
+| `DOT_DEVICE_ID` | Secret **或** Variable | 设备序列号（工作流两处都会读，放错页面也能跑） |
 | `ZHANGYU_SIGN` | Variable（可选） | 固定星座，如 `leo`；不设则按抽签 |
+
+> 工作流第一步是 **Preflight（凭据自检）**：凭据缺失会立刻以
+> `::error::` 注释 + Job Summary 给出配置位置，而不是等到推送时才报一句
+> 「未配置设备序列号」。手动触发时勾选 **dry_run** 可以只预览卡片与请求体
+> （不需要任何凭据）。
+
+**排障：`错误：未配置设备序列号` / `Error: Process completed with exit code 2`**
+
+1. `Settings → Secrets and variables → Actions` 里新建 `DOT_DEVICE_ID`
+   （Secret 或 Variable 均可），值 = 设备序列号；`DOT_API_KEY` 必须是 Secret；
+2. 只想先看输出：手动 Run workflow 时勾选 `dry_run`，或本地
+   `python run_daily.py push --dry-run --show-payload`；
+3. 本地 `python run_daily.py doctor --require-credentials` 与 CI 的预检等价，
+   退出码 2 表示凭据不全（默认 `doctor` 不会因为缺凭据而失败）。
 
 ### 方式 B：本地 crontab
 
@@ -185,7 +200,7 @@ python3 run_daily.py signs                  # 列出全部星座写法
 python3 -m unittest discover -s tests -v
 ```
 
-27 项单测覆盖：星座解析、真实响应 fixture 解析与水印清理、排版/截断/星级、离线引擎确定性、Dot 客户端请求形态（本地 mock HTTP 服务，校验路径/鉴权/请求体）与错误码处理。
+35 项单测覆盖：星座解析、真实响应 fixture 解析与水印清理、排版/截断/星级、离线引擎确定性、Dot 客户端请求形态（本地 mock HTTP 服务，校验路径/鉴权/请求体）与错误码处理，以及 CLI 契约（凭据缺失时的行为、`--show-payload` / `--dry-run` 语义、占位 device_id、幂等跳过）。
 
 ## 常见问题
 
@@ -197,6 +212,9 @@ python3 -m unittest discover -s tests -v
 | 推了但屏幕没变 | 循环内容需设备在线且 `refreshNow:true`；**固定列表**项只在 App 设定的刷新点更新 |
 | 当天想重推 | `python3 run_daily.py push --force` |
 | 接口全挂了 | 自动落到内置离线占卜引擎，卡片照常送达（数据源字段会标注“经降级”） |
+| CI 报 `未配置设备序列号`（exit 2） | 仓库没配 `DOT_DEVICE_ID`（Secret 或 Variable 均可）；见上文「排障」 |
+| `config.json` 里还是模板值 | `YOUR_DEVICE_SERIAL_NUMBER` 会被当成“未配置”，不会再打到 Dot 云换一个 404 |
+| 想看请求体但没凭据 | `push --show-payload` 现在会先打印请求体再报错；`--dry-run --show-payload` 直接成功退出 |
 | 密钥安全 | API Key 只放环境变量/CI Secret；`config.json`、`data/` 已被 `.gitignore` 排除 |
 
 ## 项目结构
@@ -213,7 +231,7 @@ python3 -m unittest discover -s tests -v
 │   ├── dot_client.py              # Dot Text API 客户端（认证/重试/错误码）
 │   └── cli.py                     # push / preview / signs / doctor
 ├── .github/workflows/daily-push.yml  # 每日定时推送（UTC 23:00 = 07:00 京/澳）
-├── tests/                         # 27 项单测 + 真实接口 fixture
+├── tests/                         # 35 项单测 + 真实接口 fixture
 ├── requirements.txt               # 零依赖说明
 └── .gitignore                     # 排除 config.json / data/ / logs/
 ```
