@@ -8,4 +8,5 @@ idf_component_register(
         "cli.c"
     PRIV_REQUIRES
         nvs_flash esp_wifi esp_netif esp_event esp_http_client json mbedtls lwip
+        epd render
     INCLUDE_DIRS ".")

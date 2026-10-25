@@ -117,13 +117,9 @@ typedef struct {
     size_t len;
 } acc_t;
 
-static esp_err_t http_event(void *arg, esp_event_base_t base, int32_t id,
-                            void *data)
+static esp_err_t http_event(esp_http_client_event_t *ev)
 {
-    (void)arg;
-    (void)base;
-    if (id == HTTP_EVENT_ON_DATA) {
-        esp_http_client_event_t *ev = (esp_http_client_event_t *)data;
+    if (ev->event_id == HTTP_EVENT_ON_DATA) {
         acc_t *acc = (acc_t *)ev->user_data;
         if (acc && ev->data_len > 0) {
             size_t n = (size_t)ev->data_len;

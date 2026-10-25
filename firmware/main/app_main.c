@@ -49,8 +49,9 @@ static void date_line_build(char *out, size_t cap, int wake_no)
     localtime_r(&now, &t);
     int year = t.tm_year + 1900;
     if (now > TIME_VALID_TS && year >= 2024 && year <= 2100) {
+        static const char kWeek[] = "日一二三四五六"; /* 每字 3 字节 */
         snprintf(out, cap, "%d月%d日 周%s", t.tm_mon + 1, t.tm_mday,
-                 "日一二三四五六"[t.tm_wday]);
+                 kWeek + 3 * t.tm_wday);
     } else {
         snprintf(out, cap, "章鱼AI 第%d占", wake_no);
     }
