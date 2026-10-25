@@ -1,0 +1,24 @@
+# 本地私有配置（含设备序列号），模板见 config.example.json
+config.json
+
+# 运行状态与日志
+data/
+logs/
+
+# 固件构建产物 (CI 会产出可烧录 BIN)
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/dependencies.lock
+firmware/managed_components/
+firmware/tools/.cache/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# 本地下载的固件产物 (发布在 firmware-bin 分支)
+out/

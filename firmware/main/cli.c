@@ -1,0 +1,148 @@
+/**
+ * @file cli.c
+ * @brief USB 串口配置命令行（首次启动配网 / 星座设置）
+ */
+#include "cli.h"
+
+#include <stdio.h>
+#include <string.h>
+
+#include "esp_log.h"
+#include "fortune.h"
+
+static const char *TAG = "cli";
+
+/* 读一行 (带回显; 支持退格; 兼容 \r / \n / \r\n) */
+static int read_line(char *buf, int cap)
+{
+    int n = 0;
+    for (;;) {
+        int ch = getchar();
+        if (ch == EOF) {
+            continue;
+        }
+        if (ch == '\r' || ch == '\n') {
+            if (n == 0) {
+                continue; /* CRLF 的第二半 */
+            }
+            putchar('\n');
+            buf[n] = 0;
+            return n;
+        }
+        if (ch == 0x7F || ch == 0x08) {
+            if (n > 0) {
+                n--;
+                fputs("\b \b", stdout);
+            }
+            continue;
+        }
+        if (ch >= 0x20 && ch < 0x7F && n < cap - 1) {
+            buf[n++] = (char)ch;
+            putchar(ch);
+        }
+        fflush(stdout);
+    }
+}
+
+static void print_banner(const app_cfg_t *cfg)
+{
+    printf("\n");
+    printf("============================================\n");
+    printf(" 章鱼AI.每日占一占 — 串口配置\n");
+    printf(" 当前: ssid=%s mode=%s sign=%s\n",
+           cfg->ssid[0] ? cfg->ssid : "(未设置)", cfg->sign_mode, cfg->sign);
+    printf(" 命令:\n");
+    printf("   wifi <SSID> [密码]   保存 WiFi 并开始占卜\n");
+    printf("   sign <星座|random>   固定星座 / 每日抽签\n");
+    printf("   show                 显示当前配置\n");
+    printf("   forget               清除 WiFi (回到配网)\n");
+    printf("   go                   立即执行(已配置时)\n");
+    printf("============================================\n");
+}
+
+void cli_run(app_cfg_t *cfg)
+{
+    print_banner(cfg);
+    char line[144];
+    for (;;) {
+        printf("zhangyu> ");
+        fflush(stdout);
+        if (read_line(line, sizeof(line)) <= 0) {
+            continue;
+        }
+
+        char *cmd = strtok(line, " ");
+        if (!cmd) {
+            continue;
+        }
+        char *rest = strtok(NULL, "");
+        if (strcmp(cmd, "help") == 0) {
+            print_banner(cfg);
+        } else if (strcmp(cmd, "show") == 0) {
+            printf("ssid=%s mode=%s sign=%s(%s)\n", cfg->ssid[0] ? cfg->ssid : "-",
+                   cfg->sign_mode, cfg->sign,
+                   fortune_sign_index(cfg->sign) >= 0
+                       ? fortune_sign_cn(fortune_sign_index(cfg->sign))
+                       : "?");
+        } else if (strcmp(cmd, "forget") == 0) {
+            app_cfg_forget(cfg);
+            printf("已清除 WiFi 配置\n");
+        } else if (strcmp(cmd, "go") == 0) {
+            if (cfg->ssid[0]) {
+                printf("开始执行每日占卜...\n");
+                return;
+            }
+            printf("尚未配置 WiFi, 请先: wifi <SSID> [密码]\n");
+        } else if (strcmp(cmd, "sign") == 0) {
+            if (!rest || !rest[0]) {
+                printf("用法: sign <aries..pisces|中文名|random>\n");
+                continue;
+            }
+            if (strcmp(rest, "random") == 0) {
+                snprintf(cfg->sign_mode, sizeof(cfg->sign_mode), "random");
+                app_cfg_save(cfg);
+                printf("已设置: 每日抽签\n");
+            } else {
+                int idx = fortune_sign_index(rest);
+                if (idx < 0) {
+                    printf("无法识别星座 %s (如: leo / 狮子座)\n", rest);
+                    continue;
+                }
+                snprintf(cfg->sign_mode, sizeof(cfg->sign_mode), "fixed");
+                snprintf(cfg->sign, sizeof(cfg->sign), "%s", fortune_sign_key(idx));
+                app_cfg_save(cfg);
+                printf("已设置: 固定 %s (%s)\n", fortune_sign_cn(idx),
+                       fortune_sign_key(idx));
+            }
+        } else if (strcmp(cmd, "wifi") == 0) {
+            if (!rest || !rest[0]) {
+                printf("用法: wifi <SSID> [密码]\n");
+                continue;
+            }
+            char *sp = strchr(rest, ' ');
+            if (sp) {
+                *sp = 0;
+                while (*(sp + 1) == ' ') {
+                    sp++;
+                }
+                snprintf(cfg->pass, sizeof(cfg->pass), "%s", sp + 1);
+            } else {
+                cfg->pass[0] = 0;
+            }
+            if (strlen(rest) >= sizeof(cfg->ssid)) {
+                printf("SSID 过长 (≤31 字节)\n");
+                continue;
+            }
+            snprintf(cfg->ssid, sizeof(cfg->ssid), "%s", rest);
+            if (app_cfg_save(cfg) != ESP_OK) {
+                printf("保存失败 (NVS 错误)\n");
+                continue;
+            }
+            ESP_LOGI(TAG, "WiFi 已保存: %s", cfg->ssid);
+            printf("WiFi 已保存, 开始联网占卜...\n");
+            return;
+        } else {
+            printf("未知命令 %s (输入 help 查看)\n", cmd);
+        }
+    }
+}

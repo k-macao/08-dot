@@ -1,0 +1,47 @@
+menu "章鱼AI.每日占一占"
+
+    choice ZHANGYU_EPD_VARIANT
+        prompt "Quote/0 显示驱动版本"
+        default ZHANGYU_EPD_UC8251D
+        help
+            Dot. App 设备详情显示「首发版 / Early Bird Edition / 先発版です」
+            时选 UC8151；其余选标准版 UC8251D。
+
+        config ZHANGYU_EPD_UC8251D
+            bool "标准版 (UC8251D)"
+
+        config ZHANGYU_EPD_UC8151
+            bool "首发版 (UC8151/IL0324)"
+    endchoice
+
+    config ZHANGYU_WIFI_SSID
+        string "默认 WiFi SSID (可留空, 用 USB 串口配置)"
+        default ""
+
+    config ZHANGYU_WIFI_PASSWORD
+        string "默认 WiFi 密码"
+        default ""
+
+    config ZHANGYU_SIGN_MODE
+        string "抽签模式 random / fixed"
+        default "random"
+
+    config ZHANGYU_SIGN
+        string "fixed 模式下的星座 (aries..pisces / 中文名)"
+        default "aries"
+
+    config ZHANGYU_TITLE
+        string "卡片标题"
+        default "章鱼AI.每日占一占"
+
+    config ZHANGYU_WAKE_HOUR
+        int "每日唤醒小时 (UTC+8)"
+        range 0 23
+        default 8
+
+    config ZHANGYU_WAKE_MINUTE
+        int "每日唤醒分钟"
+        range 0 59
+        default 30
+
+endmenu
