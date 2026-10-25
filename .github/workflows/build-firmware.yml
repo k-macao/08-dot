@@ -1,5 +1,8 @@
 name: firmware-build
 
+permissions:
+  contents: write
+
 on:
   workflow_dispatch:
     inputs:
@@ -108,3 +111,33 @@ jobs:
             firmware/build/partition_table/partition-table.bin
             firmware/build/烧录说明.txt
           if-no-files-found: error
+
+      # 同时把 BIN 发布到 firmware-bin 分支 (单提交滚动更新, 便于 git 直接获取)
+      - name: Publish bins to firmware-bin branch
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SRC="$GITHUB_WORKSPACE/firmware/build"
+          STAGE=$(mktemp -d)
+          cp "$SRC/zhangyu_daily_full.bin" "$SRC/zhangyu_daily.bin" \
+             "$SRC/bootloader/bootloader.bin" \
+             "$SRC/partition_table/partition-table.bin" \
+             "$SRC/烧录说明.txt" "$STAGE/"
+          if [ -f "$SRC/flash_args" ]; then cp "$SRC/flash_args" "$STAGE/"; fi
+          SHA=$(sha256sum "$SRC/zhangyu_daily_full.bin" | awk '{print $1}')
+          SIZE=$(stat -c%s "$SRC/zhangyu_daily_full.bin")
+          printf '{"commit":"%s","size":%s,"sha256":"%s","built_at":"%s","run_url":"%s"}\n' \
+            "$GITHUB_SHA" "$SIZE" "$SHA" "$(date -u +%FT%TZ)" \
+            "https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            > "$STAGE/manifest.json"
+          cd "$STAGE"
+          git init -q -b firmware-bin
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "zhangyu_daily ${GITHUB_SHA:0:12} $(date -u +%FT%TZ)"
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push -f -q origin firmware-bin
+          echo "已发布到 firmware-bin 分支"
