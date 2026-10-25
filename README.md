@@ -6,7 +6,7 @@
 >
 > | 路线 | 说明 | 入口 |
 > | --- | --- | --- |
-> | **① 纯固件 BIN（刷机）** | ESP-IDF 独立固件：设备自己联网取运势、16px 中文字库本地渲染、每天 08:30 自动更新，不依赖 Dot 云 | [`firmware/`](firmware/README.md) + CI 产物 `zhangyu-daily-bin` |
+> | **① 纯固件 BIN（刷机）** | ESP-IDF 独立固件：设备自己联网取运势、16px 中文字库本地渲染、每天 07:00 自动更新，不依赖 Dot 云 | [`firmware/`](firmware/README.md) + CI 产物 `zhangyu-daily-bin` |
 > | **② 云端 Text API（免刷机）** | 按 dot_open_platform 开放接口每日把卡片推到设备 | 本文下方流水线 + GitHub Actions `daily-push` |
 
 ```text
@@ -15,7 +15,7 @@
  freehoroscope ─┤                                  device/:id/text
  内置离线引擎 ──┘
        ▲
-  每日定时：GitHub Actions (UTC 00:30 = 京/澳 08:30)  或  本地 crontab
+  每日定时：GitHub Actions (UTC 23:00 = 京/澳 07:00)  或  本地 crontab
 ```
 
 ## 一、对 dot_open_platform 的理解（任务 1）
@@ -137,7 +137,7 @@ python3 run_daily.py signs                  # 列出全部星座写法
 ### 方式 A：GitHub Actions（推荐，仓库已在 GitHub 上）
 
 工作流：[.github/workflows/daily-push.yml](.github/workflows/daily-push.yml)
-每天 **UTC 00:30（北京/澳门 08:30）** 自动运行“单测 → 推送”，并支持手动触发（可传入星座）。
+每天 **UTC 23:00（北京/澳门次日 07:00）** 自动运行“单测 → 推送”，并支持手动触发（可传入星座）。
 
 一次性配置（仓库 **Settings → Secrets and variables → Actions**）：
 
@@ -150,8 +150,8 @@ python3 run_daily.py signs                  # 列出全部星座写法
 ### 方式 B：本地 crontab
 
 ```cron
-# 每天 08:30（机器时区为 UTC+8 时）推送
-30 8 * * * cd /path/to/08-dot && DOT_API_KEY='dot_app_xxx' /usr/bin/python3 run_daily.py push >> logs/push.log 2>&1
+# 每天 07:00（机器时区为 UTC+8 时）推送
+0 7 * * * cd /path/to/08-dot && DOT_API_KEY='dot_app_xxx' /usr/bin/python3 run_daily.py push >> logs/push.log 2>&1
 ```
 
 > macOS/Linux 通用；确保 cron 环境能访问外网，并提前 `mkdir -p logs`。
@@ -207,7 +207,7 @@ python3 -m unittest discover -s tests -v
 │   ├── formatter.py               # Text API 卡片排版（title/message/signature）
 │   ├── dot_client.py              # Dot Text API 客户端（认证/重试/错误码）
 │   └── cli.py                     # push / preview / signs / doctor
-├── .github/workflows/daily-push.yml  # 每日定时推送（UTC 00:30）
+├── .github/workflows/daily-push.yml  # 每日定时推送（UTC 23:00 = 07:00 京/澳）
 ├── tests/                         # 27 项单测 + 真实接口 fixture
 ├── requirements.txt               # 零依赖说明
 └── .gitignore                     # 排除 config.json / data/ / logs/

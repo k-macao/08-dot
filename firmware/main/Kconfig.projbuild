@@ -37,11 +37,11 @@ menu "章鱼AI.每日占一占"
     config ZHANGYU_WAKE_HOUR
         int "每日唤醒小时 (UTC+8)"
         range 0 23
-        default 8
+        default 7
 
     config ZHANGYU_WAKE_MINUTE
         int "每日唤醒分钟"
         range 0 59
-        default 30
+        default 0
 
 endmenu

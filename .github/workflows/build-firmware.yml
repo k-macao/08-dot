@@ -2,6 +2,7 @@ name: firmware-build
 
 permissions:
   contents: write
+  actions: read
 
 on:
   workflow_dispatch:
@@ -28,17 +29,94 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Select display edition
+      # 发现 WiFi 预设 — 约定: 条目 name = WiFi 名称(SSID), value = 密码
+      # 不走 API(GITHUB_TOKEN 无权访问配置端点), 用 toJson(vars) 读 Variables;
+      # 不整批读 secrets(会被 GitHub 2026 起的 workflow 安全拦截), Secret 仅用固定名精确引用
+      - name: Discover WiFi preset
+        id: wifi
         shell: bash
+        env:
+          ALL_VARS: ${{ toJson(vars) }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+
+          def load(raw):
+              raw = (raw or "").strip()
+              if not raw:
+                  return {}
+              try:
+                  d = json.loads(raw)
+                  return d if isinstance(d, dict) else {}
+              except Exception:
+                  print("::warning::JSON 解析失败: " + raw[:120])
+                  return {}
+
+          variables = load(os.environ.get("ALL_VARS"))
+
+          RESERVED = {"WIFI_SSID", "WIFI_PASSWORD", "ZHANGYU_WIFI_SSID",
+                      "ZHANGYU_WIFI_PASSWORD", "ZHANGYU_SIGN", "ZHANGYU_STYLE",
+                      "ZHANGYU_TITLE", "DOT_API_KEY", "DOT_DEVICE_ID"}
+
+          def reserved(n):
+              return n in RESERVED or n.startswith(("WIFI_", "ZHANGYU_", "DOT_"))
+
+          def nonempty(v):
+              return isinstance(v, str) and v != ""
+
+          ssid = pw = src = ""
+
+          # 1) 兼容固定命名 (value = SSID): WIFI_SSID / ZHANGYU_WIFI_SSID
+          ssid = variables.get("WIFI_SSID") or variables.get("ZHANGYU_WIFI_SSID") or ""
+          pw = variables.get("WIFI_PASSWORD") or variables.get("ZHANGYU_WIFI_PASSWORD") or ""
+          if ssid:
+              src = "Variable(WIFI_SSID 固定命名)"
+
+          # 2) 约定命名 Variables: name = WiFi 名, value = 密码
+          if not ssid:
+              cand = sorted((n, v) for n, v in variables.items() if not reserved(n))
+              if len(cand) > 1:
+                  print("::notice::发现多个疑似 WiFi 变量: " +
+                        ", ".join(n for n, _ in cand) + " — 取字母序第一个")
+              if cand:
+                  ssid, pw = cand[0]
+                  src = "Variable(name=WiFi名)"
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"ssid={ssid}\npass={pw}\nsource={src}\n")
+          if ssid:
+              print(f"已发现 WiFi 预设: SSID={ssid}  来源={src}  "
+                    f"密码={'已读取(不回显)' if pw else '空'}")
+          else:
+              print("::notice::未在 Variables 发现 WiFi 预设 (name=WiFi名, value=密码) — "
+                    "若配置在 Secrets 页, 请移至 Variables, 或使用固定名 "
+                    "WIFI_SSID/WIFI_PASSWORD; 否则固件走串口配网")
+          PY
+
+      - name: Inject WiFi & select display edition
+        shell: bash
+        env:
+          CFG_WIFI_SSID: ${{ steps.wifi.outputs.ssid }}
+          # 变量路径 value=密码; Secret 路径按 name 动态取 value(密码)
+          CFG_WIFI_PASSWORD: ${{ steps.wifi.outputs.pass || secrets.WIFI_PASSWORD || secrets.ZHANGYU_WIFI_PASSWORD || '' }}
         run: |
           . $IDF_PATH/export.sh
           cd firmware
+          # 预设 WiFi → 写入 sdkconfig.defaults (set-target 时生成进 sdkconfig, 固件首启从 NVS 播种)
+          if [ -n "$CFG_WIFI_SSID" ]; then
+            printf 'CONFIG_ZHANGYU_WIFI_SSID="%s"\nCONFIG_ZHANGYU_WIFI_PASSWORD="%s"\n' \
+              "$CFG_WIFI_SSID" "$CFG_WIFI_PASSWORD" >> sdkconfig.defaults
+            echo "::notice::已注入 GitHub 预设 WiFi: SSID=$CFG_WIFI_SSID (密码不回显)"
+          else
+            echo "::notice::GitHub 未发现 WiFi 预设 (name=WiFi名, value=密码), 固件走串口配网"
+          fi
           # set-target 会生成 sdkconfig; 首发版在这里切换驱动
           idf.py set-target esp32c3 >/dev/null
           if [ "${{ github.event.inputs.edition }}" = "early" ]; then
             sed -i 's/^CONFIG_ZHANGYU_EPD_UC8251D=y$/# CONFIG_ZHANGYU_EPD_UC8251D is not set/; s/^# CONFIG_ZHANGYU_EPD_UC8151 is not set$/CONFIG_ZHANGYU_EPD_UC8151=y/' sdkconfig
           fi
           grep 'ZHANGYU_EPD' sdkconfig
+          echo "::notice::$(grep -E 'CONFIG_ZHANGYU_WAKE_(HOUR|MINUTE)=' sdkconfig | tr '\n' ' ')"
 
       - name: Build
         shell: bash
@@ -93,7 +171,7 @@ jobs:
                或 idf.py monitor / screen /dev/ttyACM0 115200
             3. 输入:  wifi <SSID> [密码]
                可选:  sign 狮子座  或  sign random
-            4. 保存后自动联网 → 显示今日运势 → 深度休眠, 之后每天 08:30 自动更新
+            4. 保存后自动联网 → 显示今日运势 → 深度休眠, 之后每天 07:00 自动更新
 
           注意: 自定义固件会覆盖出厂固件 (保修失效, 见官方 custom-firmware-guide)
           EOF

@@ -1,14 +1,14 @@
 # 章鱼AI.每日占一占 — Quote/0 独立固件 (ESP-IDF)
 
-不依赖 Dot 云：设备自己联网拉取**每日占星运程**，本地渲染上屏，每天 08:30 自动更新。
+不依赖 Dot 云：设备自己联网拉取**每日占星运程**，本地渲染上屏，每天 07:00 自动更新。
 
 ```text
-上电/每日 08:30 唤醒
+上电/每日 07:00 唤醒
    → 联网 (NVS/串口配置的 WiFi)
    → SNTP 校时 (UTC+8)
    → 拉取运势: xxapi → freehoroscope → 内置离线占卜引擎
    → 16px 中文字库渲染 152x296 卡片 (标题: 章鱼AI.每日占一占)
-   → 深度休眠至下一个 08:30 (网络故障 12 小时后重试)
+   → 深度休眠至下一个 07:00 (网络故障 12 小时后重试)
 ```
 
 ## 构建 (GitHub Actions, 本仓库自带)
@@ -64,10 +64,30 @@ zhangyu> sign random                  # 可选: 每日抽签 (默认)
 zhangyu> show / forget / help / go
 ```
 
-之后每天 **08:30** 自动：联网 → 取运势 → 渲染 → 休眠。
+之后每天 **07:00** 自动：联网 → 取运势 → 渲染 → 休眠。
 配置存 NVS，断电不丢；`forget` 清除 WiFi 回到配网模式。
 
-也可在构建时注入 WiFi（不走串口）：`idf.py menuconfig` → 「章鱼AI.每日占一占」
+### WiFi 由 GitHub 预设（推荐，免串口）
+
+CI 构建时自动读取仓库的 Actions 配置并烧入固件。**约定：条目的
+name = WiFi 名称（SSID），value = 密码**：
+
+| 位置（Settings → Secrets and variables → Actions） | 读取方式 |
+| --- | --- |
+| **Variables**（推荐） | name = WiFi 名，value = 密码 —— CI 自动读取 |
+| **Secrets**（固定名） | 变量名 `WIFI_PASSWORD`（或 `ZHANGYU_WIFI_PASSWORD`）= 密码，SSID 用变量 `WIFI_SSID` 提供 |
+
+- 开放网络：value 留空；
+- 同类条目多于一个时取**字母序第一个**（请只保留一条 WiFi 配置）；
+- WiFi 名含空格（且不用固定命名）时，该名称作为 name 无法作为变量名，此时请
+  改用 `WIFI_SSID=<WiFi名>` / `WIFI_PASSWORD=<密码>` 固定命名；
+- ⚠️ 不要把 name=WiFi名 的条目放在 **Secrets** 页：GitHub 出于安全策略拦截
+  批量读取 Secrets 的构建，请放 **Variables** 页（或用上面的固定命名）；
+- 构建日志的 Annotations 会显示是否发现预设（`::notice::` 行，只回显 SSID）；
+- 未设置任何条目 → 固件仍走下方的串口配网；
+- 改动配置后重新 **Run workflow** 构建即可得到新 BIN。
+
+本地构建注入也可用：`idf.py menuconfig` → 「章鱼AI.每日占一占」
 填 `默认 WiFi SSID/密码`。
 
 ## 显示驱动版本
