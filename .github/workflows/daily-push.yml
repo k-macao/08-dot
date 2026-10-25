@@ -10,6 +10,10 @@ on:
         description: "星座（留空则按仓库配置抽签，如 leo / 狮子座 / random）"
         required: false
         default: ""
+      dry_run:
+        description: "只预览（排版 + 请求体，不推送，无需任何凭据）"
+        type: boolean
+        default: false
 
 jobs:
   push:
@@ -24,16 +28,57 @@ jobs:
         with:
           python-version: "3.12"
 
+      # 凭据来源（三者取其一，优先级从左到右）：
+      #   device_id : secrets.DOT_DEVICE_ID  →  vars.DOT_DEVICE_ID  →  config.json
+      #   api_key   : secrets.DOT_API_KEY（只走 Secret，不要放 Variables）
+      # device_id 只是设备序列号（非敏感），所以 Secret 和 Variable 都接受 ——
+      # 之前只读 secrets，放错页面就会得到"未配置设备序列号"。
+      - name: Preflight（凭据自检）
+        env:
+          DOT_API_KEY: ${{ secrets.DOT_API_KEY }}
+          DOT_DEVICE_ID: ${{ secrets.DOT_DEVICE_ID || vars.DOT_DEVICE_ID }}
+          ZHANGYU_SIGN: ${{ vars.ZHANGYU_SIGN || github.event.inputs.sign }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "::notice::dry_run=true — 跳过凭据硬校验，本次不会推送设备"
+            python run_daily.py doctor || true
+          else
+            python run_daily.py doctor --require-credentials
+          fi
+
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
 
       - name: Push daily horoscope to Dot device
         env:
           # 在仓库 Settings → Secrets and variables → Actions 中配置：
-          #   DOT_API_KEY    Dot. App 导出的 API Key
-          #   DOT_DEVICE_ID  设备序列号（也可放 config.json，但建议用 Secret）
+          #   DOT_API_KEY    Dot. App 导出的 API Key（Secret）
+          #   DOT_DEVICE_ID  设备序列号（Secret 或 Variable 均可）
           DOT_API_KEY: ${{ secrets.DOT_API_KEY }}
-          DOT_DEVICE_ID: ${{ secrets.DOT_DEVICE_ID }}
+          DOT_DEVICE_ID: ${{ secrets.DOT_DEVICE_ID || vars.DOT_DEVICE_ID }}
           # 可选的仓库变量：固定星座（不设则按 config/抽签）
           ZHANGYU_SIGN: ${{ vars.ZHANGYU_SIGN || github.event.inputs.sign }}
-        run: python run_daily.py push --show-payload
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python run_daily.py push --dry-run --show-payload
+          else
+            python run_daily.py push --show-payload
+          fi
+
+      - name: Failure hints
+        if: failure()
+        run: |
+          {
+            echo "### ❌ 每日推送失败"
+            echo ""
+            echo "常见原因与处理："
+            echo ""
+            echo "| 现象 | 处理 |"
+            echo "| --- | --- |"
+            echo "| \`未配置 device_id\` | Settings → Secrets and variables → Actions：新建 Secret \`DOT_DEVICE_ID\`（或 Variable，同名）＝ 设备序列号 |"
+            echo "| \`未配置 DOT_API_KEY\` | 同上页新建 Secret \`DOT_API_KEY\` ＝ Dot. App 导出的 \`dot_app_xxx\` |"
+            echo "| 推送失败：404 | 设备序列号写错，或 Dot. App → Content Studio 还没把 **Text API** 内容加进设备的循环列表 |"
+            echo "| 推送失败：403 | 该 API Key 无权操作此设备 |"
+            echo "| 只是想先看看卡片 | 重新运行本 workflow 时勾选 **dry_run**，或本地 \`python run_daily.py push --dry-run --show-payload\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::推送失败 — 详见本次 run 的 Summary 与上方日志"

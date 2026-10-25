@@ -1,10 +1,13 @@
 """章鱼AI.每日占一占 — 命令行入口。
 
 用法：
-    python run_daily.py push      [--sign leo|狮子座|random] [--style brief|full] [--dry-run]
+    python run_daily.py push      [--sign leo|狮子座|random] [--style brief|full]
+                                  [--dry-run] [--show-payload] [--force]
     python run_daily.py preview   [--sign ...] [--fixture path.json] [--provider offline]
     python run_daily.py signs
-    python run_daily.py doctor
+    python run_daily.py doctor    [--require-credentials]   # CI 预检用
+
+    没有凭据也能自检：push --dry-run --show-payload 打印排版与请求体后正常退出。
 """
 
 from __future__ import annotations
@@ -128,6 +131,47 @@ def _print_card(card: Dict[str, Any], fortune: Fortune) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 凭据
+# --------------------------------------------------------------------------- #
+
+# config.example.json 里的占位值：原样照抄时必须当成"没配置"，否则会打到
+# Dot 云再吃一个看不懂的 404。
+PLACEHOLDER_DEVICE_IDS = {"", "YOUR_DEVICE_SERIAL_NUMBER", "YOUR_DEVICE_ID", "xxx"}
+
+CREDENTIAL_HINT = """如何配置：
+  · 本地运行：cp config.example.json config.json 后填 "device_id"，
+    或  export DOT_DEVICE_ID='设备序列号'   export DOT_API_KEY='dot_app_xxx'
+  · GitHub Actions：仓库 Settings → Secrets and variables → Actions
+      Secrets：    DOT_API_KEY = dot_app_xxx
+      Secrets 或 Variables：DOT_DEVICE_ID = 设备序列号（两处都支持）
+    改完后重跑 workflow（Actions → 每日占星推送 → Run workflow）。
+  · 只想看请求体/排版而不推送：python run_daily.py push --dry-run --show-payload"""
+
+
+def read_credentials(cfg: Dict[str, Any]) -> tuple:
+    """返回 (device_id, api_key)，均为去掉首尾空白后的字符串。"""
+    device_id = str(cfg.get("device_id") or "").strip()
+    api_key = os.environ.get("DOT_API_KEY", "").strip()
+    return device_id, api_key
+
+
+def missing_credentials(device_id: str, api_key: str) -> list:
+    """返回缺失项的名称列表（空列表 = 齐全）。"""
+    problems = []
+    if device_id in PLACEHOLDER_DEVICE_IDS:
+        problems.append("device_id")
+    if not api_key:
+        problems.append("DOT_API_KEY")
+    return problems
+
+
+def print_payload(body: Dict[str, Any], device_id: str) -> None:
+    print("将要发送的请求体 (POST /api/authV2/open/device/{deviceId}/text):")
+    print(json.dumps(body, ensure_ascii=False, indent=2))
+    print(f"deviceId: {device_id or '(未配置)'}")
+
+
+# --------------------------------------------------------------------------- #
 # 子命令
 # --------------------------------------------------------------------------- #
 
@@ -145,9 +189,29 @@ def cmd_push(args) -> int:
         brand=cfg.get("brand") or "章鱼AI",
     )
 
+    body = build_body(
+        card,
+        task_type=args.task_type or cfg["task_type"],
+        task_key=args.task_key or cfg.get("task_key"),
+        task_alias=cfg.get("task_alias"),
+        refresh_now=cfg.get("refresh_now", True),
+        icon=cfg.get("icon_url"),
+        link=cfg.get("nfc_link"),
+    )
+    device_id, api_key = read_credentials(cfg)
+    problems = missing_credentials(device_id, api_key)
+
+    # --show-payload 是"看请求体"的调试开关，必须在凭据校验之前打印 ——
+    # 之前的实现先校验凭据，导致没配 device_id 时连请求体都看不到。
+    if args.show_payload:
+        print_payload(body, device_id)
+
     if args.dry_run:
         _print_card(card, fortune)
-        print("[dry-run] 未调用 Dot 云接口。")
+        if problems:
+            print(f"[dry-run] 缺 {', '.join(problems)}；仅本地排版/请求体预览，未推送。")
+        else:
+            print("[dry-run] 未调用 Dot 云接口。")
         return 0
 
     # 幂等：当天已推送过则跳过
@@ -161,27 +225,12 @@ def cmd_push(args) -> int:
             print(f"[zhangyu] 今日 ({today.isoformat()}) 已推送过，跳过；如需重推加 --force")
             return 0
 
-    device_id = cfg.get("device_id") or ""
-    api_key = os.environ.get("DOT_API_KEY", "").strip()
-    if not device_id:
-        print("错误：未配置设备序列号。写入 config.json 的 device_id，或设置环境变量 DOT_DEVICE_ID。", file=sys.stderr)
+    if problems:
+        if args.show_payload:
+            print("[zhangyu] 以上仅为请求体预览，凭据不全，未发起推送。", file=sys.stderr)
+        print(f"错误：未配置 {', '.join(problems)}，无法推送到设备。", file=sys.stderr)
+        print(CREDENTIAL_HINT, file=sys.stderr)
         return 2
-    if not api_key:
-        print("错误：未设置环境变量 DOT_API_KEY（在 Dot. App 中创建 API Key 后导出）。", file=sys.stderr)
-        return 2
-
-    body = build_body(
-        card,
-        task_type=args.task_type or cfg["task_type"],
-        task_key=args.task_key or cfg.get("task_key"),
-        task_alias=cfg.get("task_alias"),
-        refresh_now=cfg.get("refresh_now", True),
-        icon=cfg.get("icon_url"),
-        link=cfg.get("nfc_link"),
-    )
-
-    if args.show_payload:
-        print(json.dumps(body, ensure_ascii=False, indent=2))
 
     try:
         message = push_text(
@@ -262,9 +311,18 @@ def cmd_doctor(args) -> int:
     today = local_today(cfg["timezone"])
     print(f"{APP_NAME} v{__version__} 自检")
     print(f"- 今天({cfg['timezone']}): {today.isoformat()}")
-    device_id = (cfg.get("device_id") or "").strip() or os.environ.get("DOT_DEVICE_ID", "").strip()
-    print(f"- device_id: {device_id or '未配置 ❌'}")
-    print(f"- DOT_API_KEY: {'已设置 ✅' if os.environ.get('DOT_API_KEY') else '未设置 ❌（仅在推送时需要）'}")
+    device_id, api_key = read_credentials(cfg)
+    problems = missing_credentials(device_id, api_key)
+    if "device_id" in problems:
+        shown = "未配置 ❌" if not device_id else f"仍是模板占位值 {device_id!r} ❌"
+    else:
+        shown = f"{device_id} ✅"
+    print(f"- device_id: {shown}")
+    print(f"- DOT_API_KEY: {'已设置 ✅' if api_key else '未设置 ❌（推送时必需）'}")
+    if problems and getattr(args, "require_credentials", False):
+        print(f"\n错误：缺少 {', '.join(problems)}。", file=sys.stderr)
+        print(CREDENTIAL_HINT, file=sys.stderr)
+        return 2
     print(f"- sign_mode: {cfg['sign_mode']}  style: {cfg['style']}  task_type: {cfg['task_type']}")
 
     sign = resolve_sign(cfg, None, today)
@@ -316,6 +374,12 @@ def main(argv=None) -> int:
 
     p_doctor = sub.add_parser("doctor", help="环境自检")
     p_doctor.add_argument("--config", help="配置文件路径")
+    p_doctor.add_argument(
+        "--require-credentials",
+        dest="require_credentials",
+        action="store_true",
+        help="凭据缺失时以退出码 2 结束（CI 预检用）",
+    )
 
     args = parser.parse_args(argv)
     command = args.command or "push"
