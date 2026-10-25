@@ -74,14 +74,16 @@ name = WiFi 名称（SSID），value = 密码**：
 
 | 位置（Settings → Secrets and variables → Actions） | 读取方式 |
 | --- | --- |
-| **Variables**（推荐） | name = WiFi 名，value = 密码 —— CI 直接读取 |
-| **Secrets**（兼容支持） | name = WiFi 名，value = 密码 —— CI 按 name 动态读取，日志不回显密码 |
+| **Variables**（推荐） | name = WiFi 名，value = 密码 —— CI 自动读取 |
+| **Secrets**（固定名） | 变量名 `WIFI_PASSWORD`（或 `ZHANGYU_WIFI_PASSWORD`）= 密码，SSID 用变量 `WIFI_SSID` 提供 |
 
 - 开放网络：value 留空；
-- 兼容旧命名：变量 `WIFI_SSID`（value=SSID）+ `WIFI_PASSWORD`（value=密码）同样识别；
 - 同类条目多于一个时取**字母序第一个**（请只保留一条 WiFi 配置）；
-- SSID/密码中请避免双引号 `"`；SSID 含空格等字符时请改用 `WIFI_SSID=value` 方式
-  （变量名本身不能含空格）；
+- WiFi 名含空格（且不用固定命名）时，该名称作为 name 无法作为变量名，此时请
+  改用 `WIFI_SSID=<WiFi名>` / `WIFI_PASSWORD=<密码>` 固定命名；
+- ⚠️ 不要把 name=WiFi名 的条目放在 **Secrets** 页：GitHub 出于安全策略拦截
+  批量读取 Secrets 的构建，请放 **Variables** 页（或用上面的固定命名）；
+- 构建日志的 Annotations 会显示是否发现预设（`::notice::` 行，只回显 SSID）；
 - 未设置任何条目 → 固件仍走下方的串口配网；
 - 改动配置后重新 **Run workflow** 构建即可得到新 BIN。
 

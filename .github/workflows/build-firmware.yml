@@ -30,13 +30,13 @@ jobs:
         uses: actions/checkout@v4
 
       # 发现 WiFi 预设 — 约定: 条目 name = WiFi 名称(SSID), value = 密码
-      # 不走 API(GITHUB_TOKEN 无权访问配置端点), 直接用表达式 toJson(vars)/toJson(secrets)
+      # 不走 API(GITHUB_TOKEN 无权访问配置端点), 用 toJson(vars) 读 Variables;
+      # 不整批读 secrets(会被 GitHub 2026 起的 workflow 安全拦截), Secret 仅用固定名精确引用
       - name: Discover WiFi preset
         id: wifi
         shell: bash
         env:
           ALL_VARS: ${{ toJson(vars) }}
-          ALL_SECRETS: ${{ toJson(secrets) }}
         run: |
           python3 - <<'PY'
           import json, os
@@ -53,7 +53,6 @@ jobs:
                   return {}
 
           variables = load(os.environ.get("ALL_VARS"))
-          secrets_map = load(os.environ.get("ALL_SECRETS"))
 
           RESERVED = {"WIFI_SSID", "WIFI_PASSWORD", "ZHANGYU_WIFI_SSID",
                       "ZHANGYU_WIFI_PASSWORD", "ZHANGYU_SIGN", "ZHANGYU_STYLE",
@@ -83,30 +82,15 @@ jobs:
                   ssid, pw = cand[0]
                   src = "Variable(name=WiFi名)"
 
-          # 3) 约定命名 Secrets: name = WiFi 名, value = 密码
-          if not ssid:
-              cand_s = sorted(n for n in secrets_map if not reserved(n))
-              usable = [(n, secrets_map[n]) for n in cand_s if nonempty(secrets_map[n])]
-              if len(cand_s) > 1:
-                  print("::notice::发现多个疑似 WiFi Secret: " +
-                        ", ".join(cand_s) + " — 取字母序第一个")
-              if usable:
-                  ssid, pw = usable[0]
-                  src = "Secret(name=WiFi名)"
-              elif cand_s:
-                  print("::notice::Secrets 中发现 %s 但其 value 未能经表达式读出, "
-                        "请改放到 Variables (name=WiFi名, value=密码)" % cand_s[0])
-
-          # Secrets 路径若 toJson 读不出值 → 输出 name 供注入步骤 secrets[...] 动态回退
-          sec_fallback = ssid if (src == "Secret(name=WiFi名)" and not pw) else ""
-
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
-              f.write(f"ssid={ssid}\npass={pw}\nsource={src}\nsecret_name={sec_fallback}\n")
+              f.write(f"ssid={ssid}\npass={pw}\nsource={src}\n")
           if ssid:
               print(f"已发现 WiFi 预设: SSID={ssid}  来源={src}  "
                     f"密码={'已读取(不回显)' if pw else '空'}")
           else:
-              print("未发现 WiFi 预设 — 固件将走串口配网")
+              print("::notice::未在 Variables 发现 WiFi 预设 (name=WiFi名, value=密码) — "
+                    "若配置在 Secrets 页, 请移至 Variables, 或使用固定名 "
+                    "WIFI_SSID/WIFI_PASSWORD; 否则固件走串口配网")
           PY
 
       - name: Inject WiFi & select display edition
@@ -114,7 +98,7 @@ jobs:
         env:
           CFG_WIFI_SSID: ${{ steps.wifi.outputs.ssid }}
           # 变量路径 value=密码; Secret 路径按 name 动态取 value(密码)
-          CFG_WIFI_PASSWORD: ${{ steps.wifi.outputs.pass || (steps.wifi.outputs.secret_name != '' && secrets[format('{0}', steps.wifi.outputs.secret_name)]) || '' }}
+          CFG_WIFI_PASSWORD: ${{ steps.wifi.outputs.pass || secrets.WIFI_PASSWORD || secrets.ZHANGYU_WIFI_PASSWORD || '' }}
         run: |
           . $IDF_PATH/export.sh
           cd firmware
