@@ -1,7 +1,13 @@
 # 章鱼AI.每日占一占
 
-> 每日占星运程 → Dot 硬件设备（Quote/0 等）墨水屏卡片，按 Dot 开放平台 **Text API** 每日自动推送。
-> 卡片标题：**章鱼AI.每日占一占**
+> 每日占星运程 → Dot 硬件设备（Quote/0 等）墨水屏卡片，卡片标题：**章鱼AI.每日占一占**
+>
+> 两条实现路线（可并存）：
+>
+> | 路线 | 说明 | 入口 |
+> | --- | --- | --- |
+> | **① 纯固件 BIN（刷机）** | ESP-IDF 独立固件：设备自己联网取运势、16px 中文字库本地渲染、每天 08:30 自动更新，不依赖 Dot 云 | [`firmware/`](firmware/README.md) + CI 产物 `zhangyu-daily-bin` |
+> | **② 云端 Text API（免刷机）** | 按 dot_open_platform 开放接口每日把卡片推到设备 | 本文下方流水线 + GitHub Actions `daily-push` |
 
 ```text
 [线上占星接口]  ──►  zhangyu 排版/降级/幂等  ──►  Dot 云 Text API  ──►  设备墨水屏

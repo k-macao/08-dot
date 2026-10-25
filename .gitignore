@@ -5,6 +5,14 @@ config.json
 data/
 logs/
 
+# 固件构建产物 (CI 会产出可烧录 BIN)
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/dependencies.lock
+firmware/managed_components/
+firmware/tools/.cache/
+
 # Python
 __pycache__/
 *.py[cod]
