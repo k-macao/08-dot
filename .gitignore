@@ -19,3 +19,6 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+
+# 本地下载的固件产物 (发布在 firmware-bin 分支)
+out/
