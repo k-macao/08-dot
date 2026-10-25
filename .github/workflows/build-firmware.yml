@@ -42,7 +42,25 @@ jobs:
         run: |
           . $IDF_PATH/export.sh
           cd firmware
-          idf.py build
+          set -o pipefail
+          idf.py build 2>&1 | tee /tmp/build.log && exit 0
+          # 失败: 把错误行提取成 annotations (沙箱看不到 CI 日志, 注释可见)
+          echo "BUILD_FAILED"
+          grep -nE 'error:|Error [0-9]+|undefined reference|CMake Error|FAILED:' /tmp/build.log \
+            | tail -50 | while IFS= read -r line; do
+                echo "::error::${line:0:350}"
+              done
+          {
+            echo '### ❌ 编译失败 — 关键错误行'
+            echo '```'
+            grep -nE 'error:|Error [0-9]+|undefined reference|CMake Error|FAILED:' /tmp/build.log | tail -50
+            echo '```'
+            echo '### 日志尾部'
+            echo '```'
+            tail -40 /tmp/build.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
 
       - name: Merge full-flash image
         shell: bash
