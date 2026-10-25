@@ -2,8 +2,8 @@ name: 每日占星推送 (章鱼AI.每日占一占)
 
 on:
   schedule:
-    # 每天 UTC 00:30 = 北京/澳门时间 08:30
-    - cron: "30 0 * * *"
+    # 每天 UTC 23:00 = 北京/澳门时间 次日 07:00
+    - cron: "0 23 * * *"
   workflow_dispatch:
     inputs:
       sign:
