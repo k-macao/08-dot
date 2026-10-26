@@ -214,14 +214,21 @@ class ApiKeyShapeTest(unittest.TestCase):
         self.assertEqual(health["body_len"], 64)
         self.assertEqual(health["expected_total_len"], 72)
 
-    def test_missing_prefix_is_reported_with_numbers(self):
+    def test_missing_prefix_is_only_a_hint(self):
+        """实测存在无前缀但可用的 Key（68 位 → 返回 404 而非 400，说明认证已过）
+        因此"缺前缀/位数不同"只能算提示，不能算错误。"""
         health = api_key_health("x" * 68)
-        self.assertFalse(health["looks_valid"])
-        joined = " ".join(health["problems"])
+        self.assertTrue(health["looks_valid"])
+        self.assertEqual(health["problems"], [])
+        joined = " ".join(health["hints"])
         self.assertIn("没有 dot_app_ 前缀", joined)
         self.assertIn("68", joined)
         self.assertIn("76", joined)   # 补前缀后的长度
         self.assertIn("64", joined)   # 官方 payload 位数
+
+    def test_real_world_68_char_key_passes(self):
+        health = api_key_health("A1b2C3d4E5f6" * 5 + "G7h8")   # 68 位，字母数字
+        self.assertTrue(health["looks_valid"])
 
     def test_bare_payload_is_flagged_but_fixable(self):
         health = api_key_health("U" * 64)

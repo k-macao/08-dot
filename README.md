@@ -168,31 +168,53 @@ python3 run_daily.py signs                  # 列出全部星座写法
 3. 本地 `python run_daily.py doctor --require-credentials` 与 CI 的预检等价，
    退出码 2 表示凭据不全（默认 `doctor` 不会因为缺凭据而失败）。
 
-### API Key 到底长什么样（对着长度自查最快）
+### API Key 到底长什么样（别再靠长度猜）
 
-官方 Text API 文档里的认证头是 `Authorization: Bearer dot_app_<64 位>`，
-所以**合法 token 是 72 个字符**：
+官方 Text API 文档的示例是 `Authorization: Bearer dot_app_<64 位>`（共 72 字符），
+但**真实 Key 并不保证是这个形状**：本项目实测过一个 68 位、没有 `dot_app_` 前缀的值，
+补前缀会被 400 拒、而**原值却能通过认证**（返回 404 而非 400，说明 Key 是好的）。
 
-| 形态 | 长度 | 例 |
-| --- | --- | --- |
-| ✅ 完整 token | **72** | `dot_app_UlSpzXNEXhYZ…QxbY`（`dot_app_` 8 + 载荷 64） |
-| ⚠️ 只有载荷 | 64 | 少了 `dot_app_`，本工具会自动补 |
-| ⚠️ 不是 Dot 的 Key | 其它 | 例如 68 位：既不是 64 也不是 72，多为复制到别的东西 |
+所以：
 
-`doctor` / 推送日志会直接打印「你的值 N 字符，补前缀后 M 字符，官方示例 72」，
-以及是否像 GitHub（`ghp_`）、OpenAI（`sk-`）、JWT（`eyJ`）等其它服务的 token。
+| 情况 | 处理 |
+| --- | --- |
+| 带 `dot_app_` 前缀 | 直接用 |
+| 只有 64 位载荷 | 自动补前缀 |
+| 其它长度、无前缀 **但服务端认** | 自动换形重试，成功后会**记住**这个形态（写进 `data/state.json` 的 `key_form`），下次直接用它，不再先吃一个 400 |
+| 以 `ghp_` / `sk-` / `xox*-` / `secret_` / `eyJ` 开头 | 这是**别的服务**的 token，一定会失败，`doctor` 会直接点出来 |
 
-> 还有一个**决定性**的自查办法：Dot. App → **API Key** 列表会显示每个 Key 的
-> **创建时间与最近使用时间**。如果刚跑完 CI、那个 Key 的「最近使用时间」没有更新，
-> 说明请求里带的根本不是这个 Key（Secret 里放的是别的东西）；反之说明 Key 用的是对的，
-> 失败原因就在别处。
+形态与文档不符时，日志只作提示（`提示（不影响使用…）`），不再当错误喊 —— 是否有效由服务端说了算。
+想强制指定形态：`export ZHANGYU_KEY_FORM=raw`（或 `prefixed`）。
+
+> **决定性自查**：Dot. App → **API Key** 列表会显示每个 Key 的「创建时间 / 最近使用时间」。
+> 刚跑完 CI，如果那个 Key 的「最近使用时间」没有更新，说明请求里带的不是它。
+
+### 404「没有文本 API 内容」——必须先在 App 里加一次
+
+`POST …/text` 只更新**已存在**的 Text API 槽位。设备列表里没有这个槽位时，无论 Key 多正确都会 404：
+
+```
+Dot. App → 内容工坊 / Content Studio → 选择这台设备
+        → 把「Text API」内容加入【循环列表】→ 保存
+```
+
+加一次即可，之后每天自动推送。手动排查：
+
+```bash
+python3 run_daily.py doctor --check-content
+# - loop 列表: TEXT_API(txt-loop-1) ✅ 有 Text API 内容
+# - fixed 列表: 空 ❌ 没有 Text API 内容
+```
+
+本工具还会在推送前自动查两个列表：**循环列表里没有、固定列表里有 → 自动改用固定列表推送**（并在日志里说明），
+省掉一次必然失败的 404。
 
 **排障：`HTTP 400 This API key is invalid. Check the key and try again.`**
 
 请求已经发出去了，是 Dot 云判定 **Key 本身无效**（不是权限、也不是设备问题）。按顺序核对：
 
-0. **先量长度**：合法 token 是 72 字符（`dot_app_` + 64）。若 `doctor` 报「没有前缀 / 位数不对」，
-   说明贴进去的不是 Dot 的 Key（或只贴了一半），重新从 App 复制完整值；
+0. **先看日志报的是哪种形态**：本工具会依次尝试「补前缀」与「原值」，两者都被 400 才判定 Key 无效；
+   只有日志出现「以其它服务的 token 开头」时才说明贴错了东西（`ghp_` / `sk-` / `eyJ` 等）；
 1. **重新导出一遍**：Dot. App → 导出 API Key，重新生成通常会让旧 Key **立即作废**；
 2. **别带污染**：复制时把引号、空格、`Bearer ` 一起带进 Secret 是最常见的坑
    （本工具会就地清理并打印「已清理 引号/Bearer 前缀」，但仍建议原样粘贴）；
@@ -241,7 +263,7 @@ python3 run_daily.py signs                  # 列出全部星座写法
 python3 -m unittest discover -s tests -v
 ```
 
-67 项单测覆盖：星座解析、真实响应 fixture 解析与水印清理、排版/截断/星级、离线引擎确定性、Dot 客户端请求形态（本地 mock HTTP 服务，校验路径/鉴权/请求体）与错误码处理，CLI 契约（凭据缺失时的行为、`--show-payload` / `--dry-run` 语义、占位 device_id、幂等跳过），API Key 清洗（引号/空白/`Bearer ` 前缀）、Key 形态软校验（72 字符 / 前缀 / 异种 token）与补前缀失败自动换形重试，以及无效 Key 的排查提示。
+74 项单测覆盖：星座解析、真实响应 fixture 解析与水印清理、排版/截断/星级、离线引擎确定性、Dot 客户端请求形态（本地 mock HTTP 服务，校验路径/鉴权/请求体）与错误码处理，CLI 契约（凭据缺失时的行为、`--show-payload` / `--dry-run` 语义、占位 device_id、幂等跳过），API Key 清洗（引号/空白/`Bearer ` 前缀）、Key 形态软校验（72 字符 / 前缀 / 异种 token）与补前缀失败自动换形重试，Key 形态记忆、列表查询与内容槽位自动选择（loop/fixed），以及无效 Key 的排查提示。
 
 ## 常见问题
 
@@ -273,7 +295,7 @@ python3 -m unittest discover -s tests -v
 │   ├── dot_client.py              # Dot Text API 客户端（认证/重试/错误码）
 │   └── cli.py                     # push / preview / signs / doctor
 ├── .github/workflows/daily-push.yml  # 每日定时推送（UTC 23:00 = 07:00 京/澳）
-├── tests/                         # 67 项单测 + 真实接口 fixture
+├── tests/                         # 74 项单测 + 真实接口 fixture
 ├── requirements.txt               # 零依赖说明
 └── .gitignore                     # 排除 config.json / data/ / logs/
 ```
