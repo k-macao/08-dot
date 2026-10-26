@@ -29,14 +29,85 @@ class DotAPIError(RuntimeError):
         self.message = message
 
 
+# 从文档/邮件/聊天窗口复制密钥时最常见的一圈"污染"
+API_KEY_QUOTES = "\"'\u201c\u201d\u2018\u2019`"
+
+
+def clean_api_key(raw: str) -> "tuple[str, list[str]]":
+    """清掉粘贴污染，返回 (key, 清理说明列表)。
+
+    Dot 云对 key 是逐字符比对的，多一个引号、空格或 `Bearer ` 前缀都会得到
+    `HTTP 400 This API key is invalid`。这里把常见污染就地修掉，并把"修了什么"
+    记下来供日志/自检展示（绝不回显密钥本体）。
+
+    引号可能在 `Bearer ` 的外面也可能在里面（`"Bearer key"` / `Bearer "key"`），
+    所以剥离动作跑两轮，直到稳定。
+    """
+    notes: list = []
+    key = raw or ""
+
+    def note(item: str) -> None:
+        if item not in notes:
+            notes.append(item)
+
+    for _ in range(2):
+        before = key
+        if key != key.strip():
+            note("首尾空白")
+        key = key.strip()
+
+        unquoted = key.strip(API_KEY_QUOTES)
+        if unquoted != key:
+            note("引号")
+        key = unquoted
+
+        if len(key) >= 2 and key.startswith("<") and key.endswith(">"):
+            note("尖括号")
+            key = key[1:-1]
+
+        if key.lower().startswith("bearer"):
+            note("Bearer 前缀")
+            key = key[len("bearer"):].lstrip(" :：")
+
+        if key == before:
+            break
+
+    if any(ch.isspace() for ch in key):
+        note("中间空白")
+        key = "".join(key.split())
+
+    return key, notes
+
+
 def normalize_api_key(api_key: str) -> str:
-    """确保 key 带 `dot_app_` 前缀（文档示例为 Bearer dot_app_xxx）。"""
-    key = (api_key or "").strip()
+    """清洗粘贴污染，并确保 key 带 `dot_app_` 前缀（Bearer dot_app_xxx）。"""
+    key, _notes = clean_api_key(api_key)
     if not key:
         raise DotAPIError(None, "API Key 为空，请在 Dot. App 中创建并导出 API Key")
     if not key.startswith(API_KEY_PREFIX):
         key = API_KEY_PREFIX + key
     return key
+
+
+def api_key_summary(raw: str) -> str:
+    """给日志/自检用的安全指纹：只有长度与结构特征，没有密钥内容。"""
+    key, notes = clean_api_key(raw)
+    if not key:
+        return "空"
+    parts = [f"长度 {len(key)}"]
+    parts.append("带 dot_app_ 前缀" if key.startswith(API_KEY_PREFIX)
+                 else "无 dot_app_ 前缀（发送时会自动补）")
+    if notes:
+        parts.append("已清理 " + "/".join(notes))
+    if len(key) < 24:
+        parts.append("偏短，可能不完整 ⚠️")
+    return "，".join(parts)
+
+
+def looks_like_api_key(value: str) -> bool:
+    """判断某个值是不是"密钥"而不是设备序列号（用于发现两个 Secret 填反）。"""
+    key, _ = clean_api_key(value)
+    return key.startswith("dot_app_") or key.startswith("dot_") or len(key) > 40
 
 
 def build_body(
