@@ -135,6 +135,7 @@ python3 run_daily.py push --force           # 忽略当天幂等，强制重推
 python3 run_daily.py push --show-payload    # 打印请求体（凭据缺失时也会打印）
 python3 run_daily.py push --dry-run --show-payload   # 只看排版+请求体，无需任何凭据
 python3 run_daily.py push --provider xxapi  # 只用某个数据源
+python3 run_daily.py doctor --check-key     # 真调只读接口验证 API Key 是否有效
 python3 run_daily.py signs                  # 列出全部星座写法
 ```
 
@@ -166,6 +167,22 @@ python3 run_daily.py signs                  # 列出全部星座写法
    `python run_daily.py push --dry-run --show-payload`；
 3. 本地 `python run_daily.py doctor --require-credentials` 与 CI 的预检等价，
    退出码 2 表示凭据不全（默认 `doctor` 不会因为缺凭据而失败）。
+
+**排障：`HTTP 400 This API key is invalid. Check the key and try again.`**
+
+请求已经发出去了，是 Dot 云判定 **Key 本身无效**（不是权限、也不是设备问题）。按顺序核对：
+
+1. **重新导出一遍**：Dot. App → 导出 API Key，重新生成通常会让旧 Key **立即作废**；
+2. **别带污染**：复制时把引号、空格、`Bearer ` 一起带进 Secret 是最常见的坑
+   （本工具会就地清理并打印「已清理 引号/Bearer 前缀」，但仍建议原样粘贴）；
+3. **别填反**：`DOT_DEVICE_ID` = 设备序列号（如 `ABCD1234ABCD`），
+   `DOT_API_KEY` = `dot_app_…`；填反时 `doctor` 会直接告警「两个 Secret 可能填反了」；
+4. **位置要对**：`DOT_API_KEY` 必须是 **Secret**（Variables 页读不到）；
+5. **本地复现**：`python run_daily.py doctor --check-key`
+   —— 真的拿 Key 去问一次 Dot 云只读接口，会给出「✅ 接受 / ❌ Key 无效 / 404 设备不存在 / 403 无权限」。
+
+`doctor` 打印的「Key 指纹」只包含**长度与结构特征**（是否带 `dot_app_` 前缀、清理了什么），
+永远不会回显密钥内容。
 
 ### 方式 B：本地 crontab
 
@@ -200,13 +217,14 @@ python3 run_daily.py signs                  # 列出全部星座写法
 python3 -m unittest discover -s tests -v
 ```
 
-35 项单测覆盖：星座解析、真实响应 fixture 解析与水印清理、排版/截断/星级、离线引擎确定性、Dot 客户端请求形态（本地 mock HTTP 服务，校验路径/鉴权/请求体）与错误码处理，以及 CLI 契约（凭据缺失时的行为、`--show-payload` / `--dry-run` 语义、占位 device_id、幂等跳过）。
+52 项单测覆盖：星座解析、真实响应 fixture 解析与水印清理、排版/截断/星级、离线引擎确定性、Dot 客户端请求形态（本地 mock HTTP 服务，校验路径/鉴权/请求体）与错误码处理，CLI 契约（凭据缺失时的行为、`--show-payload` / `--dry-run` 语义、占位 device_id、幂等跳过），以及 API Key 清洗（引号/空白/`Bearer ` 前缀）与无效 Key 的排查提示。
 
 ## 常见问题
 
 | 现象 | 原因与处理 |
 | --- | --- |
 | `404` | 设备序列号不对，或设备列表里还没添加 **Text API** 内容（Dot. App → Content Studio）；`fixed` 模式需 `task_key` 与列表匹配 |
+| `400 This API key is invalid` | Key 本身无效：重新导出（别带引号/空格）、确认没和 `DOT_DEVICE_ID` 填反；`python3 run_daily.py doctor --check-key` 可复现 |
 | `403` | 该 API Key 无权操作此设备（换绑/重建 Key） |
 | `500` | 设备侧切换失败（设备离线/未响应），脚本会自动重试 3 次 |
 | 推了但屏幕没变 | 循环内容需设备在线且 `refreshNow:true`；**固定列表**项只在 App 设定的刷新点更新 |
@@ -231,7 +249,7 @@ python3 -m unittest discover -s tests -v
 │   ├── dot_client.py              # Dot Text API 客户端（认证/重试/错误码）
 │   └── cli.py                     # push / preview / signs / doctor
 ├── .github/workflows/daily-push.yml  # 每日定时推送（UTC 23:00 = 07:00 京/澳）
-├── tests/                         # 35 项单测 + 真实接口 fixture
+├── tests/                         # 52 项单测 + 真实接口 fixture
 ├── requirements.txt               # 零依赖说明
 └── .gitignore                     # 排除 config.json / data/ / logs/
 ```

@@ -22,7 +22,14 @@ from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
 from . import APP_NAME, __version__
-from .dot_client import DotAPIError, build_body, push_text
+from .dot_client import (
+    DotAPIError,
+    api_key_summary,
+    build_body,
+    get_fixed_list,
+    looks_like_api_key,
+    push_text,
+)
 from .formatter import build_card
 from .providers import Fortune, get_fortune, parse_xxapi
 from .signs import SIGNS, parse_sign, random_sign
@@ -165,6 +172,32 @@ def missing_credentials(device_id: str, api_key: str) -> list:
     return problems
 
 
+def swapped_secrets(device_id: str, api_key: str) -> bool:
+    """两个 Secret 填反的典型症状：device_id 长得像密钥。"""
+    return bool(device_id) and looks_like_api_key(device_id)
+
+
+def api_key_rejected_hint(api_key: str, device_id: str) -> None:
+    """HTTP 400/401「This API key is invalid」的定向排查清单。"""
+    print("提示：Dot 云明确判定 API Key 无效（不是权限问题，也不是设备问题）。", file=sys.stderr)
+    print(f"  实际发送的 Key：{api_key_summary(api_key)}", file=sys.stderr)
+    if swapped_secrets(device_id, api_key):
+        print(
+            "  ⚠️ 你的 DOT_DEVICE_ID 看起来是 API Key —— 两个 Secret 很可能填反了。",
+            file=sys.stderr,
+        )
+    print("  逐项核对：", file=sys.stderr)
+    print("   1. 值是否 = Dot. App → 设置/开发者 → 导出的完整 Key（dot_app_…），"
+          "复制时别带引号、空格、`Bearer `；本工具会自动清常见污染但仍建议原样粘贴",
+          file=sys.stderr)
+    print("   2. Key 是否已失效：在 App 里重新生成/导出后，把新值写进 Secret"
+          "（重新生成通常会让旧 Key 立即作废）", file=sys.stderr)
+    print("   3. 是否填错了位置：`DOT_API_KEY` 必须是 Secret（Variables 页不会读到），"
+          "`DOT_DEVICE_ID` = 设备序列号", file=sys.stderr)
+    print("   4. Key 与设备是否同一账号（换过账号/换绑设备需重新导出）", file=sys.stderr)
+    print("   5. 本地快速验证：python run_daily.py doctor --check-key", file=sys.stderr)
+
+
 def print_payload(body: Dict[str, Any], device_id: str) -> None:
     print("将要发送的请求体 (POST /api/authV2/open/device/{deviceId}/text):")
     print(json.dumps(body, ensure_ascii=False, indent=2))
@@ -241,6 +274,8 @@ def cmd_push(args) -> int:
         )
     except DotAPIError as exc:
         print(f"推送失败：{exc}", file=sys.stderr)
+        if exc.status in (400, 401):
+            api_key_rejected_hint(api_key, device_id)
         if exc.status == 404:
             print(
                 "提示：404 通常是 ① 设备序列号不对 ② 设备的循环/固定列表里还没有添加 Text API 内容"
@@ -319,10 +354,35 @@ def cmd_doctor(args) -> int:
         shown = f"{device_id} ✅"
     print(f"- device_id: {shown}")
     print(f"- DOT_API_KEY: {'已设置 ✅' if api_key else '未设置 ❌（推送时必需）'}")
+    if api_key:
+        print(f"    · Key 指纹: {api_key_summary(api_key)}")
+    if swapped_secrets(device_id, api_key):
+        print(
+            "    · ⚠️ device_id 看起来是 API Key —— 两个 Secret 可能填反了"
+            "（DOT_DEVICE_ID=设备序列号，DOT_API_KEY=dot_app_…）"
+        )
     if problems and getattr(args, "require_credentials", False):
         print(f"\n错误：缺少 {', '.join(problems)}。", file=sys.stderr)
         print(CREDENTIAL_HINT, file=sys.stderr)
         return 2
+    # 可选：真的拿 Key 去问一次 Dot 云（只读接口，不改设备内容）
+    if getattr(args, "check_key", False):
+        if problems:
+            print("- Key 有效性: 跳过（凭据不全）")
+        else:
+            try:
+                get_fixed_list(device_id=device_id, api_key=api_key, timeout=10.0)
+                print("- Key 有效性: ✅ Dot 云接受了该 Key 与设备序列号")
+            except DotAPIError as exc:
+                print(f"- Key 有效性: ❌ {exc}")
+                if exc.status in (400, 401):
+                    print("  → Key 本身无效（生成/复制/失效问题，见下方清单）")
+                    api_key_rejected_hint(api_key, device_id)
+                elif exc.status == 404:
+                    print("  → Key 有效但设备序列号不存在（或未绑定到该账号）")
+                elif exc.status == 403:
+                    print("  → Key 有效但无权访问该设备")
+
     print(f"- sign_mode: {cfg['sign_mode']}  style: {cfg['style']}  task_type: {cfg['task_type']}")
 
     sign = resolve_sign(cfg, None, today)
@@ -379,6 +439,12 @@ def main(argv=None) -> int:
         dest="require_credentials",
         action="store_true",
         help="凭据缺失时以退出码 2 结束（CI 预检用）",
+    )
+    p_doctor.add_argument(
+        "--check-key",
+        dest="check_key",
+        action="store_true",
+        help="调用 Dot 云只读接口验证 API Key 是否有效（不改设备内容）",
     )
 
     args = parser.parse_args(argv)

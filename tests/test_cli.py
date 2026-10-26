@@ -128,3 +128,78 @@ class IdempotencyTest(CLITestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ApiKeyRejectedTest(CLITestCase):
+    """HTTP 400「This API key is invalid」必须有定向排查提示。"""
+
+    def setUp(self):
+        super().setUp()
+        self.write_config({"device_id": "ABCD1234ABCD"})
+        os.environ["DOT_API_KEY"] = '"dot_app_deadbeefdeadbeef"'
+
+    def _patch_push(self, exc):
+        from unittest import mock
+
+        return mock.patch.object(cli, "push_text", side_effect=exc)
+
+    def test_invalid_key_prints_targeted_hint(self):
+        from zhangyu.dot_client import DotAPIError
+
+        with self._patch_push(DotAPIError(400, "This API key is invalid. Check the key and try again.")):
+            code, _, err = self.run_cli("push")
+        self.assertEqual(code, 1)
+        self.assertIn("This API key is invalid", err)
+        self.assertIn("实际发送的 Key", err)
+        self.assertIn("已清理", err)          # 提示我们清掉了引号
+        self.assertIn("重新生成", err)         # 失效 Key 的处理
+        self.assertIn("doctor --check-key", err)
+        # 绝不回显密钥本体
+        self.assertNotIn("deadbeef", err)
+
+    def test_swapped_secrets_are_called_out(self):
+        from zhangyu.dot_client import DotAPIError
+
+        os.environ["DOT_API_KEY"] = "ABCD1234ABCD"
+        self.write_config({"device_id": "dot_app_abcd1234efgh"})
+        with self._patch_push(DotAPIError(400, "This API key is invalid.")):
+            _, _, err = self.run_cli("push")
+        self.assertIn("填反", err)
+
+    def test_403_still_reports_permission(self):
+        from zhangyu.dot_client import DotAPIError
+
+        with self._patch_push(DotAPIError(403, "forbidden")):
+            code, _, err = self.run_cli("push")
+        self.assertEqual(code, 1)
+        self.assertIn("403", err)
+        self.assertNotIn("填反", err)
+
+    def test_check_key_ok_against_mock_cloud(self):
+        from unittest import mock
+
+        with mock.patch.object(cli, "get_fixed_list", return_value={"data": []}):
+            code, out, _ = self.run_cli("doctor", "--check-key")
+        self.assertEqual(code, 0)
+        self.assertIn("Key 有效性: ✅", out)
+
+    def test_check_key_invalid_reports_and_hints(self):
+        from unittest import mock
+        from zhangyu.dot_client import DotAPIError
+
+        with mock.patch.object(
+            cli, "get_fixed_list",
+            side_effect=DotAPIError(400, "This API key is invalid."),
+        ):
+            code, out, err = self.run_cli("doctor", "--check-key")
+        self.assertEqual(code, 0)          # 自检不因 Key 无效而崩
+        self.assertIn("Key 有效性: ❌", out)
+        self.assertIn("Key 本身无效", out)
+        self.assertIn("重新生成", err)
+
+    def test_check_key_skipped_without_credentials(self):
+        os.environ.pop("DOT_API_KEY")
+        self.write_config({})
+        code, out, _ = self.run_cli("doctor", "--check-key")
+        self.assertEqual(code, 0)
+        self.assertIn("跳过", out)
