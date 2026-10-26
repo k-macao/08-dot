@@ -29,9 +29,12 @@ from .dot_client import (
     api_key_summary,
     build_body,
     get_fixed_list,
+    get_task_list,
     looks_like_api_key,
     normalize_api_key,
+    pick_text_task,
     push_text,
+    text_tasks,
 )
 from .formatter import build_card
 from .providers import Fortune, get_fortune, parse_xxapi
@@ -181,22 +184,28 @@ def swapped_secrets(device_id: str, api_key: str) -> bool:
 
 
 def api_key_shape_lines(api_key: str) -> list:
-    """Key 形状的可疑点（不回显密钥内容），供日志与自检展示。"""
-    health = api_key_health(api_key)
-    return list(health["problems"])
+    """Key 形状的**硬问题**（不回显密钥内容）。"""
+    return list(api_key_health(api_key)["problems"])
+
+
+def api_key_shape_hints(api_key: str) -> list:
+    """与文档示例的差异（可能仍然可用，仅作提示）。"""
+    return list(api_key_health(api_key)["hints"])
 
 
 def warn_api_key_shape(api_key: str) -> None:
-    """发送前就把"这不像 Dot API Key"讲清楚，省掉一轮 400。"""
+    """只在"一定不对"时告警（空 / 别的服务的 token / 含非法字符）。
+
+    与文档示例不同的位数或缺少 `dot_app_` 前缀**不再**当错误喊 ——
+    实测存在无前缀但完全可用的 Key，喊错会把人带偏。
+    """
     problems = api_key_shape_lines(api_key)
     if not problems:
         return
-    print("⚠️ DOT_API_KEY 的形态与官方格式不符（仍会照发，但很可能被拒）：",
-          file=sys.stderr)
+    print("⚠️ DOT_API_KEY 看起来不是 Dot API Key（仍会照发）：", file=sys.stderr)
     for item in problems:
         print(f"  · {item}", file=sys.stderr)
-    print("  官方格式见 https://dot.mindreset.tech/docs/service/open/text_api"
-          "（Authorization: Bearer dot_app_<64 位>）", file=sys.stderr)
+    print("  请在 Dot. App → API Key 里重新导出完整值。", file=sys.stderr)
 
 
 def api_key_rejected_hint(api_key: str, device_id: str) -> None:
@@ -223,6 +232,107 @@ def api_key_rejected_hint(api_key: str, device_id: str) -> None:
     print("   5. 本地快速验证：python run_daily.py doctor --check-key", file=sys.stderr)
 
 
+def state_key_form(state_path: Path) -> Optional[str]:
+    """读取上一次被服务端接受的 Key 形态（"raw" / "prefixed"）。"""
+    env = os.environ.get("ZHANGYU_KEY_FORM", "").strip().lower()
+    if env in ("raw", "prefixed"):
+        return env
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    form = str(state.get("key_form") or "").lower()
+    return form if form in ("raw", "prefixed") else None
+
+
+def describe_task_lists(device_id: str, api_key: str, timeout: float) -> "dict":
+    """查 loop / fixed 两个列表，找出 Text API 槽位。"""
+    result: Dict[str, Any] = {"loop": None, "fixed": None, "errors": {}}
+    for task_type in ("loop", "fixed"):
+        try:
+            tasks = get_task_list(
+                task_type, device_id=device_id, api_key=api_key, timeout=timeout
+            )
+            result[task_type] = tasks
+        except DotAPIError as exc:
+            result["errors"][task_type] = exc
+    return result
+
+
+def report_task_lists(lists: Dict[str, Any]) -> None:
+    for task_type in ("loop", "fixed"):
+        if task_type in lists["errors"]:
+            print(f"- {task_type} 列表: 查询失败（{lists['errors'][task_type].message}）")
+            continue
+        tasks = lists[task_type] or []
+        picked = pick_text_task(tasks)
+        summary = ", ".join(
+            f"{str(t.get('type', '?'))}"
+            + (f"({t.get('key')})" if t.get("key") else "")
+            for t in tasks
+            if isinstance(t, dict)
+        ) or "空"
+        if picked is None:
+            print(f"- {task_type} 列表: {summary} ❌ 没有 Text API 内容")
+        else:
+            print(f"- {task_type} 列表: {summary} ✅ 有 Text API 内容")
+
+
+def content_missing_hint(task_type: str, key: str) -> None:
+    """Text API 内容没加进列表时的精确操作步骤。"""
+    print("怎么修（一次就好，之后无需再动）：", file=sys.stderr)
+    print("  Dot. App → 内容工坊 / Content Studio → 选择这台设备 →",
+          file=sys.stderr)
+    print(f"  把「Text API」内容添加到【{'循环' if task_type == 'loop' else '固定'}列表】"
+          "（Add Text API to the loop list）→ 保存 → 重跑。", file=sys.stderr)
+
+
+def resolve_content_target(
+    cfg: Dict[str, Any], args, device_id: str, api_key: str
+) -> "tuple[str, Optional[str]]":
+    """决定这次写哪个列表的哪个槽位；能在 404 之前就把问题说清楚。
+
+    返回 (task_type, task_key)。若循环列表里没有 Text API 内容而固定列表里有，
+    自动改用固定列表（并在日志里说明），省掉一次必然失败的 404。
+    """
+    task_type = (args.task_type or cfg.get("task_type") or "loop").strip()
+    task_key = args.task_key or cfg.get("task_key")
+    explicit = bool(args.task_type or args.task_key)
+
+    try:
+        lists = describe_task_lists(device_id, api_key, float(getattr(args, "timeout", 20.0)))
+    except Exception:  # 预检失败不阻断推送
+        return task_type, task_key
+
+    loop_pick = pick_text_task(lists["loop"]) if lists["loop"] is not None else None
+    fixed_pick = pick_text_task(lists["fixed"]) if lists["fixed"] is not None else None
+
+    if task_key:  # 显式指定就不猜
+        return task_type, task_key
+
+    current = loop_pick if task_type == "loop" else fixed_pick
+    other_type = "fixed" if task_type == "loop" else "loop"
+    other = fixed_pick if task_type == "loop" else loop_pick
+
+    if current is not None:
+        return task_type, (current.get("key") or None)
+
+    if other is not None and not explicit:
+        print(
+            f"[zhangyu] 提醒：{'循环' if task_type == 'loop' else '固定'}列表里没有 Text API 内容，"
+            f"但『{'固定' if other_type == 'fixed' else '循环'}列表』里有 —— 已自动改用该列表推送。",
+            file=sys.stderr,
+        )
+        print(
+            f"[zhangyu] 想固定下来：python run_daily.py push --task-type {other_type}"
+            + (f" --task-key {other.get('key')}" if other.get('key') else ""),
+            file=sys.stderr,
+        )
+        return other_type, (other.get("key") or None)
+
+    return task_type, task_key
+
+
 def print_payload(body: Dict[str, Any], device_id: str) -> None:
     print("将要发送的请求体 (POST /api/authV2/open/device/{deviceId}/text):")
     print(json.dumps(body, ensure_ascii=False, indent=2))
@@ -247,17 +357,26 @@ def cmd_push(args) -> int:
         brand=cfg.get("brand") or "章鱼AI",
     )
 
+    device_id, api_key = read_credentials(cfg)
+    problems = missing_credentials(device_id, api_key)
+
+    # 先确定写哪个列表的哪个槽位（能在必然 404 之前就把问题定位出来），
+    # 再据此组装请求体。
+    if problems:
+        task_type = args.task_type or cfg["task_type"]
+        task_key = args.task_key or cfg.get("task_key")
+    else:
+        task_type, task_key = resolve_content_target(cfg, args, device_id, api_key)
+
     body = build_body(
         card,
-        task_type=args.task_type or cfg["task_type"],
-        task_key=args.task_key or cfg.get("task_key"),
+        task_type=task_type,
+        task_key=task_key,
         task_alias=cfg.get("task_alias"),
         refresh_now=cfg.get("refresh_now", True),
         icon=cfg.get("icon_url"),
         link=cfg.get("nfc_link"),
     )
-    device_id, api_key = read_credentials(cfg)
-    problems = missing_credentials(device_id, api_key)
 
     # --show-payload 是"看请求体"的调试开关，必须在凭据校验之前打印 ——
     # 之前的实现先校验凭据，导致没配 device_id 时连请求体都看不到。
@@ -292,6 +411,7 @@ def cmd_push(args) -> int:
 
     warn_api_key_shape(api_key)
     form_notes: list = []
+    key_info: dict = {}
     try:
         message = push_text(
             body,
@@ -299,6 +419,8 @@ def cmd_push(args) -> int:
             api_key=api_key,
             timeout=float(args.timeout),
             note=form_notes,
+            preferred_form=state_key_form(state_path),
+            info=key_info,
         )
     except DotAPIError as exc:
         for line in form_notes:
@@ -307,11 +429,17 @@ def cmd_push(args) -> int:
         if exc.status in (400, 401):
             api_key_rejected_hint(api_key, device_id)
         if exc.status == 404:
-            print(
-                "提示：404 通常是 ① 设备序列号不对 ② 设备的循环/固定列表里还没有添加 Text API 内容"
-                "（Dot. App → Content Studio）。",
-                file=sys.stderr,
+            print("提示：404 表示这台设备的该列表里没有 Text API 内容槽位。",
+                  file=sys.stderr)
+            lists = describe_task_lists(device_id, api_key, float(args.timeout))
+            if lists["errors"]:
+                print("（顺带查了一下任务列表，结果如下）", file=sys.stderr)
+            report_task_lists(lists)
+            has_any = pick_text_task(lists["loop"] or []) or pick_text_task(
+                lists["fixed"] or []
             )
+            if has_any is None:
+                content_missing_hint(task_type, task_key or "")
         if exc.status == 403:
             print("提示：403 表示该 API Key 无权操作此设备。", file=sys.stderr)
         return 1
@@ -328,6 +456,9 @@ def cmd_push(args) -> int:
                     "title": card["title"],
                     "message": card["message"],
                     "device_message": message,
+                    "task_type": task_type,
+                    "task_key": task_key,
+                    **({"key_form": key_info["form"]} if key_info.get("form") else {}),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -390,6 +521,8 @@ def cmd_doctor(args) -> int:
         print(f"    · Key 指纹: {api_key_summary(api_key)}")
         for item in api_key_shape_lines(api_key):
             print(f"    · ⚠️ {item}")
+        for item in api_key_shape_hints(api_key):
+            print(f"    · 提示（不影响使用，服务端会以实际形态验证）: {item}")
     if swapped_secrets(device_id, api_key):
         print(
             "    · ⚠️ device_id 看起来是 API Key —— 两个 Secret 可能填反了"
@@ -438,6 +571,20 @@ def cmd_doctor(args) -> int:
                     print("  → Key 有效但设备序列号不存在（或未绑定到该账号）")
                 elif exc.status == 403:
                     print("  → Key 有效但无权访问该设备")
+
+    # 可选：查这台设备的 loop / fixed 列表里有没有 Text API 内容槽位
+    if getattr(args, "check_content", False):
+        if problems:
+            print("- 内容槽位: 跳过（凭据不全）")
+        else:
+            print("- 内容槽位（Text API 必须存在于某个列表里，否则推送必然 404）:")
+            lists = describe_task_lists(device_id, api_key, 10.0)
+            report_task_lists(lists)
+            target = pick_text_task(lists["loop"] or []) or pick_text_task(
+                lists["fixed"] or []
+            )
+            if target is None and not lists["errors"]:
+                content_missing_hint(str(cfg.get("task_type") or "loop"), "")
 
     print(f"- sign_mode: {cfg['sign_mode']}  style: {cfg['style']}  task_type: {cfg['task_type']}")
 
@@ -501,6 +648,12 @@ def main(argv=None) -> int:
         dest="check_key",
         action="store_true",
         help="调用 Dot 云只读接口验证 API Key 是否有效（不改设备内容）",
+    )
+    p_doctor.add_argument(
+        "--check-content",
+        dest="check_content",
+        action="store_true",
+        help="查询设备的循环/固定列表，确认已添加 Text API 内容（推送 404 的根因）",
     )
 
     args = parser.parse_args(argv)

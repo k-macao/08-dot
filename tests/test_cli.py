@@ -222,3 +222,104 @@ class CheckKeyNetworkTest(CLITestCase):
         self.assertIn("无法判定", out)
         self.assertNotIn("Key 本身无效", out)
         self.assertNotIn("重新生成", err)
+
+
+class ContentTargetTest(CLITestCase):
+    """Text API 内容加在哪个列表，决定推送写哪里（404 的根因）。"""
+
+    LOOP_EMPTY = [{"type": "GENERAL", "key": "gen1"}]
+    FIXED_WITH_TEXT = [{"type": "TEXT_API", "key": "txt-fixed-1", "taskAlias": "运势"}]
+    LOOP_WITH_TEXT = [{"type": "TEXT_API", "key": "txt-loop-1"}]
+
+    def _lists(self, loop, fixed):
+        from unittest import mock
+
+        def fake(task_type, **kwargs):
+            return list(loop) if task_type == "loop" else list(fixed)
+
+        return mock.patch.object(cli, "get_task_list", side_effect=fake)
+
+    def test_uses_loop_when_text_api_present(self):
+        self.write_config({"device_id": "ABCD1234ABCD"})
+        os.environ["DOT_API_KEY"] = "dot_app_" + "U" * 64
+        with self._lists(self.LOOP_WITH_TEXT, []):
+            code, out, _ = self.run_cli("doctor", "--check-content")
+        self.assertEqual(code, 0)
+        self.assertIn("loop 列表", out)
+        self.assertIn("✅ 有 Text API 内容", out)
+
+    def test_reports_missing_text_api_and_app_steps(self):
+        self.write_config({"device_id": "ABCD1234ABCD"})
+        os.environ["DOT_API_KEY"] = "dot_app_" + "U" * 64
+        with self._lists(self.LOOP_EMPTY, []):
+            code, out, err = self.run_cli("doctor", "--check-content")
+        self.assertEqual(code, 0)
+        self.assertIn("❌ 没有 Text API 内容", out)
+        self.assertIn("内容工坊", err)
+
+    def test_auto_switches_to_fixed_list(self):
+        """循环列表没有 Text API、固定列表有 → 自动改用固定列表推送。"""
+        self.write_config({"device_id": "ABCD1234ABCD"})
+        os.environ["DOT_API_KEY"] = "dot_app_" + "U" * 64
+        from unittest import mock
+
+        sent = {}
+
+        def fake_push(body, **kwargs):
+            sent.update(body)
+            return "Device ABCD1234ABCD text API content switched."
+
+        with self._lists(self.LOOP_EMPTY, self.FIXED_WITH_TEXT), \
+                mock.patch.object(cli, "push_text", side_effect=fake_push):
+            code, _, err = self.run_cli("push")
+        self.assertEqual(code, 0)
+        self.assertEqual(sent["taskType"], "fixed")
+        self.assertEqual(sent["taskKey"], "txt-fixed-1")
+        self.assertIn("已自动改用该列表", err)
+
+    def test_explicit_task_type_is_respected(self):
+        self.write_config({"device_id": "ABCD1234ABCD"})
+        os.environ["DOT_API_KEY"] = "dot_app_" + "U" * 64
+        from unittest import mock
+
+        sent = {}
+
+        def fake_push(body, **kwargs):
+            sent.update(body)
+            return "ok"
+
+        with self._lists(self.LOOP_EMPTY, self.FIXED_WITH_TEXT), \
+                mock.patch.object(cli, "push_text", side_effect=fake_push):
+            code, _, err = self.run_cli("push", "--task-type", "loop")
+        self.assertEqual(code, 0)
+        self.assertEqual(sent["taskType"], "loop")
+        self.assertNotIn("已自动改用该列表", err)
+
+
+class KeyFormMemoryTest(CLITestCase):
+    def test_accepted_raw_form_is_remembered(self):
+        """服务端接受原值形态后要记进 state，下次别再先吃一个 400。"""
+        self.write_config({"device_id": "ABCD1234ABCD"})
+        os.environ["DOT_API_KEY"] = "A1b2C3d4E5f6" * 5 + "G7h8"   # 68 位、无前缀
+
+        from unittest import mock
+
+        def fake_push(body, **kwargs):
+            kwargs["info"]["form"] = "raw"
+            return "ok"
+
+        with mock.patch.object(cli, "push_text", side_effect=fake_push), \
+                mock.patch.object(cli, "resolve_content_target",
+                                 return_value=("loop", None)):
+            code, out, _ = self.run_cli("push")
+        self.assertEqual(code, 0)
+        state = json.loads((self.tmp / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["key_form"], "raw")
+        self.assertEqual(cli.state_key_form(self.tmp / "state.json"), "raw")
+
+    def test_env_override_wins(self):
+        self.write_config({})
+        os.environ["ZHANGYU_KEY_FORM"] = "prefixed"
+        path = self.tmp / "state.json"
+        path.write_text(json.dumps({"key_form": "raw"}), encoding="utf-8")
+        self.assertEqual(cli.state_key_form(path), "prefixed")

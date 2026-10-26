@@ -49,13 +49,15 @@ jobs:
       # 只读探测：真的拿 Key 去问 Dot 云一次（/fixed/list，不改设备内容）。
       # 目的是在"推送"之前就把 `HTTP 400 This API key is invalid` 变成一条
       # 带清单的 ::error:: 注释，而不是让人对着最终失败猜原因。
-      - name: Verify API Key（只读探测）
+      # 只读探测两件事：Key 是否有效 + 设备的 loop/fixed 列表里有没有 Text API 槽位。
+      # 后者是 404 的根因，能在推送前查出来并给出 App 里的操作步骤。
+      - name: Verify API Key & Content（只读探测）
         if: ${{ inputs.dry_run != true && inputs.dry_run != 'true' }}
         env:
           DOT_API_KEY: ${{ secrets.DOT_API_KEY }}
           DOT_DEVICE_ID: ${{ secrets.DOT_DEVICE_ID || vars.DOT_DEVICE_ID }}
         run: |
-          out="$(python run_daily.py doctor --check-key 2>&1)" || true
+          out="$(python run_daily.py doctor --check-key --check-content 2>&1)" || true
           echo "$out"
           if grep -q "Key 有效性: ✅" <<< "$out"; then
             echo "::notice::API Key 与设备序列号均被 Dot 云接受"
@@ -65,6 +67,14 @@ jobs:
             echo "::warning::无法判定 Key 有效性（网络/Dot 服务临时不可用），本次照常尝试推送"
           else
             echo "::error::API Key 校验未通过 — 见上方清单（引号/换行污染、Key 失效、Secret 填反、账号不符）"
+          fi
+          # Text API 内容槽位：两个列表都没有才是硬阻塞
+          if grep -q "✅ 有 Text API 内容" <<< "$out"; then
+            echo "::notice::设备列表里已有 Text API 内容，可以推送"
+          elif grep -q "内容槽位: 跳过" <<< "$out"; then
+            echo "::warning::凭据不全，跳过内容槽位检查"
+          elif grep -q "❌ 没有 Text API 内容" <<< "$out"; then
+            echo "::error::设备的循环/固定列表里都没有 Text API 内容 → Dot. App → 内容工坊 → 该设备 → 把「Text API」加入列表"
           fi
 
       - name: Run unit tests
@@ -98,7 +108,8 @@ jobs:
             echo "| --- | --- |"
             echo "| \`未配置 device_id\` | Settings → Secrets and variables → Actions：新建 Secret \`DOT_DEVICE_ID\`（或 Variable，同名）＝ 设备序列号 |"
             echo "| \`未配置 DOT_API_KEY\` | 同上页新建 Secret \`DOT_API_KEY\` ＝ Dot. App 导出的 \`dot_app_xxx\` |"
-            echo "| 推送失败：404 | 设备序列号写错，或 Dot. App → Content Studio 还没把 **Text API** 内容加进设备的循环列表 |"
+            echo "| 推送失败：404 没有文本 API 内容 | Dot. App → 内容工坊 / Content Studio → 该设备 → 把「Text API」内容加入循环列表（或固定列表）→ 保存 |"
+            echo "| 404 但列表里确实有 Text API | 设备序列号不属于这台设备，或内容加到了另一个列表（可用 --task-type fixed 指定） |"
             echo "| 推送失败：400 \`This API key is invalid\` | Key 本身无效：Dot. App 重新导出（别带引号/空格）、确认没和 \`DOT_DEVICE_ID\` 填反；本地用 \`python run_daily.py doctor --check-key\` 复现 |"
             echo "| 推送失败：403 | 该 API Key 无权操作此设备 |"
             echo "| 只是想先看看卡片 | 重新运行本 workflow 时勾选 **dry_run**，或本地 \`python run_daily.py push --dry-run --show-payload\` |"

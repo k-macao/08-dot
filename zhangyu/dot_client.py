@@ -124,6 +124,15 @@ def api_key_health(raw: str) -> "dict":
         if any(not (ch.isalnum() or ch in "_-") for ch in body):
             problems.append("含非字母数字字符（也可能是别的服务的 token）")
 
+    # 真实世界里的 Key 并不总是 `dot_app_` + 64 位：
+    # 有人拿到的是 64 位纯载荷，也有 68 位、无前缀却完全可用的 Key
+    # （本项目实测：无前缀 68 位 → Dot 云返回 404「循环列表没有 Text API 内容」，
+    #  说明认证已通过）。因此"位数/前缀不符"只能算提示，不能算错误。
+    hard = [p for p in problems if "其它服务的 token" in p or "非字母数字" in p]
+    soft = [p for p in problems if p not in hard]
+    if not key:
+        hard.append("为空")
+
     return {
         "cleaned": key,
         "notes": notes,
@@ -131,8 +140,9 @@ def api_key_health(raw: str) -> "dict":
         "body_len": len(body),
         "total_len": len(key),
         "expected_total_len": expected_total,
-        "problems": problems,
-        "looks_valid": not problems,
+        "problems": hard,      # 一定不对（空 / 别的服务的 token / 含非法字符）
+        "hints": soft,         # 只是与文档示例不同，可能是正确的新格式
+        "looks_valid": not hard,
     }
 
 
@@ -229,6 +239,8 @@ def push_text(
     timeout: float = 20.0,
     retries: int = 3,
     note: Optional[list] = None,
+    preferred_form: Optional[str] = None,
+    info: Optional[dict] = None,
 ) -> str:
     """推送文本卡片到设备，返回接口 message；失败抛出 DotAPIError。
 
@@ -244,8 +256,18 @@ def push_text(
     if not candidates:
         raise DotAPIError(None, "API Key 为空，请在 Dot. App 中创建并导出 API Key")
 
+    # preferred_form: 上一次被服务端接受的形态（"raw" / "prefixed"），
+    # 有记录时优先用它，省掉每次都要先吃一个 400。
+    forms = ["prefixed", "raw"][: len(candidates)]
+    if preferred_form == "raw" and len(candidates) > 1:
+        candidates = list(reversed(candidates))
+        forms = list(reversed(forms))
+    elif preferred_form == "raw":
+        candidates, forms = [candidates[0]], ["raw"]
+
     last_exc: Optional[DotAPIError] = None
     for index, token in enumerate(candidates):
+        form = forms[index]
         try:
             result = _push_text_with_token(
                 body, device_id=device_id, token=token, base_url=base_url,
@@ -256,13 +278,19 @@ def push_text(
                 last_exc = exc
                 if note is not None:
                     note.append(
-                        f"以 {'补前缀' if index == 0 else '原值'} 形式被拒"
+                        f"以「{'补前缀' if form == 'prefixed' else '原值'}」形态被拒"
                         f"（HTTP {exc.status}），改用另一种形态重试"
                     )
                 continue
             raise
-        if index > 0 and note is not None:
-            note.append("服务端接受的是「原值」形态（未补 dot_app_ 前缀）")
+        if info is not None:
+            info["form"] = form
+            info["key_total_len"] = len(token)
+        if form == "raw" and note is not None:
+            note.append(
+                "服务端接受的是「原值」形态（未加 dot_app_ 前缀）；"
+                "已记住该形态，后续推送会优先使用"
+            )
         return result
 
     assert last_exc is not None
@@ -318,6 +346,84 @@ def _push_text_with_token(
             raise DotAPIError(None, f"网络错误: {exc}") from exc
 
     raise DotAPIError(None, f"重试 {retries} 次后仍失败: {last_error}")
+
+
+def _get_json(url: str, token: str, timeout: float) -> Any:
+    request = Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "zhangyu-daily-divination/1.0",
+        },
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            return json.loads(raw) if raw.strip() else None
+    except HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        try:
+            message = json.loads(raw).get("message") or raw or str(exc.reason)
+        except (json.JSONDecodeError, AttributeError):
+            message = raw or str(exc.reason)
+        raise DotAPIError(exc.code, str(message)) from exc
+    except (URLError, TimeoutError, OSError) as exc:
+        raise DotAPIError(None, f"网络错误: {exc}") from exc
+
+
+def get_task_list(
+    task_type: str,
+    *,
+    device_id: str,
+    api_key: str,
+    base_url: str = DOT_BASE_URL,
+    timeout: float = 20.0,
+) -> list:
+    """GET /api/authV2/open/device/{deviceId}/{taskType}/list
+
+    返回该设备 loop / fixed 列表里的任务项（每项含 type / key / taskAlias）。
+    type 为 TEXT_API 的那一项就是 Text API 内容槽位 —— 没有它，推送必然 404。
+    """
+    if task_type not in ("loop", "fixed"):
+        raise DotAPIError(None, f"taskType 仅支持 loop/fixed，收到 {task_type!r}")
+    device_id = (device_id or "").strip()
+    if not device_id:
+        raise DotAPIError(None, "设备序列号 (device_id) 为空")
+    token = normalize_api_key(api_key)
+    url = (
+        f"{base_url.rstrip('/')}/api/authV2/open/device/{device_id}/"
+        f"{task_type}/list"
+    )
+    data = _get_json(url, token, timeout)
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("data", "list", "tasks", "items"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return value
+    return []
+
+
+def text_tasks(tasks: list) -> list:
+    """从任务列表里挑出 Text API 槽位。"""
+    out = []
+    for item in tasks or []:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("type") or "").upper()
+        if kind == "TEXT_API":
+            out.append(item)
+    return out
+
+
+def pick_text_task(tasks: list) -> Optional[dict]:
+    """优先返回带 key 的 Text API 槽位（无 key 的是列表里第一个）。"""
+    found = text_tasks(tasks)
+    for item in found:
+        if item.get("key"):
+            return item
+    return found[0] if found else None
 
 
 def get_fixed_list(
