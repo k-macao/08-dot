@@ -80,6 +80,15 @@ class BuildCardTest(unittest.TestCase):
         self.assertTrue(any(line.startswith("幸运 ") for line in lines))
         self.assertIn("综合" in card["message"] or "★" in card["message"], (True, False))
 
+    def test_no_title_card(self):
+        """title 为空串时卡片不带标题，Text API 侧可据此不发 title 字段。"""
+        fortune = _fixture_fortune()
+        card = build_card(fortune, title="", style="brief", max_chars=90)
+        self.assertEqual(card["title"], "")
+        self.assertEqual(card["signature"], "2026年10月25日 星期日 · 章鱼AI")
+        # 正文内容与带标题时一致
+        self.assertTrue(card["message"].startswith("♈ 白羊座 · 今日运势"))
+
     def test_minimal_english_card(self):
         from zhangyu.providers import Fortune
 

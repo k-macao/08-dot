@@ -132,9 +132,11 @@ python3 run_daily.py push --sign libra      # 指定天秤座（本次）
 python3 run_daily.py push --sign random     # 指定每日抽签
 python3 run_daily.py push --style full      # 完整四段式
 python3 run_daily.py push --force           # 忽略当天幂等，强制重推
+python3 run_daily.py push --no-title        # 卡片不带标题（配合 config title: "" 也可）
 python3 run_daily.py push --show-payload    # 打印请求体（凭据缺失时也会打印）
 python3 run_daily.py push --dry-run --show-payload   # 只看排版+请求体，无需任何凭据
 python3 run_daily.py push --provider xxapi  # 只用某个数据源
+python3 run_daily.py preview --sign 狮子座 --no-title   # 无标题预览（不推送）
 python3 run_daily.py doctor --check-key     # 真调只读接口验证 API Key 是否有效
 python3 run_daily.py signs                  # 列出全部星座写法
 ```
@@ -244,7 +246,7 @@ python3 run_daily.py doctor --check-content
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `device_id` | `""` | 设备序列号；环境变量 `DOT_DEVICE_ID` 优先 |
-| `title` | `章鱼AI.每日占一占` | 卡片标题（任务 4） |
+| `title` | `章鱼AI.每日占一占` | 卡片标题；设为 `""`（或 CLI 传 `--no-title`）时卡片不带标题，Text API 也不发 `title` 字段 |
 | `sign_mode` | `random` | `random`＝每日抽签 / `fixed`＝固定 `sign` |
 | `sign` | `aries` | `fixed` 模式下的星座（中/英/符号均可） |
 | `style` | `brief` | `brief` 精简 / `full` 含四段详细文本 |

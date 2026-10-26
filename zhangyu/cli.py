@@ -134,7 +134,8 @@ def load_fortune(sign, today: dt.date, cfg: Dict[str, Any], args) -> Fortune:
 
 def _print_card(card: Dict[str, Any], fortune: Fortune) -> None:
     print("=" * 46)
-    print(f"标题：{card['title']}")
+    if card.get("title"):
+        print(f"标题：{card['title']}")
     print("-" * 46)
     print(card["message"])
     print("-" * 46)
@@ -349,9 +350,10 @@ def cmd_push(args) -> int:
     sign = resolve_sign(cfg, args.sign, today)
 
     fortune = load_fortune(sign, today, cfg, args)
+    title = "" if args.no_title else cfg["title"]
     card = build_card(
         fortune,
-        title=cfg["title"],
+        title=title,
         style=args.style or cfg["style"],
         max_chars=int(args.max_chars or cfg["max_chars"]),
         brand=cfg.get("brand") or "章鱼AI",
@@ -481,9 +483,10 @@ def cmd_preview(args) -> int:
     today = local_today(cfg["timezone"])
     sign = resolve_sign(cfg, args.sign, today)
     fortune = load_fortune(sign, today, cfg, args)
+    title = "" if args.no_title else (args.title or cfg["title"])
     card = build_card(
         fortune,
-        title=args.title or cfg["title"],
+        title=title,
         style=args.style or cfg["style"],
         max_chars=int(args.max_chars or cfg["max_chars"]),
         brand=cfg.get("brand") or "章鱼AI",
@@ -626,11 +629,21 @@ def main(argv=None) -> int:
     p_push.add_argument("--task-key", dest="task_key", help="fixed 列表项 key（覆盖配置）")
     p_push.add_argument("--timeout", type=float, default=20.0, help="Dot 接口超时秒数")
     p_push.add_argument("--show-payload", action="store_true", help="打印将要发送的请求体")
+    p_push.add_argument(
+        "--no-title",
+        action="store_true",
+        help="卡片不带标题（Text API 请求体里不发 title 字段；屏幕/预览也不显示「标题：」）",
+    )
 
     p_preview = sub.add_parser("preview", help="只排版预览卡片（不推送）")
     _add_common(p_preview)
     p_preview.add_argument("--provider", help="指定数据源：xxapi | freehoroscope | offline")
     p_preview.add_argument("--title", help="覆盖卡片标题")
+    p_preview.add_argument(
+        "--no-title",
+        action="store_true",
+        help="卡片不带标题（与 --title 互斥，--no-title 优先）",
+    )
     p_preview.add_argument("--json", action="store_true", help="额外输出 JSON 形式的卡片")
 
     sub.add_parser("signs", help="列出全部星座及识别写法")
