@@ -79,6 +79,78 @@ def clean_api_key(raw: str) -> "tuple[str, list[str]]":
     return key, notes
 
 
+# 官方 Text API 文档里的真实 Key 形态（2026 版）：
+#   Authorization: Bearer dot_app_<64 位>
+# 因此合法 token 长度 = 8 + 64 = 72。长度只能当"软校验"用（密钥格式将来可能变），
+# 但能一眼识破"填进去的根本不是 Dot Key"。
+API_KEY_EXPECTED_BODY_LEN = 64
+
+# 其它服务的 token 前缀：填错来源时能一眼认出（不是 Dot 的 Key）
+FOREIGN_TOKEN_PREFIXES = (
+    "ghp_", "gho_", "ghu_", "ghs_", "github_pat_", "sk-", "sk_", "xoxb-",
+    "xoxp-", "secret_", "eyJ",  # JWT
+)
+
+
+def api_key_health(raw: str) -> "dict":
+    """把 Key 的形状讲清楚：是否带前缀、payload 多长、是否与官方格式吻合。"""
+    key, notes = clean_api_key(raw)
+    has_prefix = key.startswith(API_KEY_PREFIX)
+    body = key[len(API_KEY_PREFIX):] if has_prefix else key
+    expected_total = len(API_KEY_PREFIX) + API_KEY_EXPECTED_BODY_LEN
+    problems: list = []
+
+    if not key:
+        problems.append("为空")
+    else:
+        if not has_prefix:
+            problems.append(
+                f"没有 {API_KEY_PREFIX} 前缀（官方 token 形如 "
+                f"{API_KEY_PREFIX}<64 位>，共 {expected_total} 字符；"
+                f"你的值 {len(key)} 字符，补前缀后 {len(key) + len(API_KEY_PREFIX)} 字符）"
+            )
+        if body and len(body) != API_KEY_EXPECTED_BODY_LEN:
+            delta = len(body) - API_KEY_EXPECTED_BODY_LEN
+            problems.append(
+                f"payload {len(body)} 位，官方示例为 {API_KEY_EXPECTED_BODY_LEN} 位"
+                f"（{'+' if delta > 0 else ''}{delta}）"
+            )
+        for prefix in FOREIGN_TOKEN_PREFIXES:
+            if body.startswith(prefix):
+                problems.append(
+                    f"像其它服务的 token（以 {prefix} 开头），不是 Dot API Key"
+                )
+                break
+        if any(not (ch.isalnum() or ch in "_-") for ch in body):
+            problems.append("含非字母数字字符（也可能是别的服务的 token）")
+
+    return {
+        "cleaned": key,
+        "notes": notes,
+        "has_prefix": has_prefix,
+        "body_len": len(body),
+        "total_len": len(key),
+        "expected_total_len": expected_total,
+        "problems": problems,
+        "looks_valid": not problems,
+    }
+
+
+def api_key_candidates(raw: str) -> "list[str]":
+    """按可能性给出要发送的 Authorization 值，供 400 时自动换形重试。
+
+    官方要求 `Bearer dot_app_<key>`：
+      1. 规范形式（缺前缀时补上）；
+      2. 原值（有些面板直接给出完整 token，或新版格式自带前缀规则）。
+    两种都失败才判定 Key 本身无效。
+    """
+    cleaned, _ = clean_api_key(raw)
+    if not cleaned:
+        return []
+    normal = normalize_api_key(cleaned)
+    return [normal] if normal == cleaned else [normal, cleaned]
+
+
 def normalize_api_key(api_key: str) -> str:
     """清洗粘贴污染，并确保 key 带 `dot_app_` 前缀（Bearer dot_app_xxx）。"""
     key, _notes = clean_api_key(api_key)
@@ -156,13 +228,56 @@ def push_text(
     base_url: str = DOT_BASE_URL,
     timeout: float = 20.0,
     retries: int = 3,
+    note: Optional[list] = None,
 ) -> str:
-    """推送文本卡片到设备，返回接口 message；失败抛出 DotAPIError。"""
+    """推送文本卡片到设备，返回接口 message；失败抛出 DotAPIError。
+
+    Key 的两种形态（补前缀 / 原值）会依次尝试：Dot 云对 token 逐字符比对，
+    某些面板导出的值已自带前缀规则，自动换形可以避免"其实只差个前缀"的苦战。
+    换形重试的结果会追加到 note（若提供），以便调用方如实报告。
+    """
     device_id = (device_id or "").strip()
     if not device_id:
         raise DotAPIError(None, "设备序列号 (device_id) 为空")
-    token = normalize_api_key(api_key)
 
+    candidates = api_key_candidates(api_key)
+    if not candidates:
+        raise DotAPIError(None, "API Key 为空，请在 Dot. App 中创建并导出 API Key")
+
+    last_exc: Optional[DotAPIError] = None
+    for index, token in enumerate(candidates):
+        try:
+            result = _push_text_with_token(
+                body, device_id=device_id, token=token, base_url=base_url,
+                timeout=timeout, retries=retries,
+            )
+        except DotAPIError as exc:
+            if exc.status in (400, 401) and index + 1 < len(candidates):
+                last_exc = exc
+                if note is not None:
+                    note.append(
+                        f"以 {'补前缀' if index == 0 else '原值'} 形式被拒"
+                        f"（HTTP {exc.status}），改用另一种形态重试"
+                    )
+                continue
+            raise
+        if index > 0 and note is not None:
+            note.append("服务端接受的是「原值」形态（未补 dot_app_ 前缀）")
+        return result
+
+    assert last_exc is not None
+    raise last_exc
+
+
+def _push_text_with_token(
+    body: Dict[str, Any],
+    *,
+    device_id: str,
+    token: str,
+    base_url: str,
+    timeout: float,
+    retries: int,
+) -> str:
     url = f"{base_url.rstrip('/')}/api/authV2/open/device/{device_id}/text"
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     request = Request(

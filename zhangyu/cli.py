@@ -24,10 +24,13 @@ from zoneinfo import ZoneInfo
 from . import APP_NAME, __version__
 from .dot_client import (
     DotAPIError,
+    api_key_candidates,
+    api_key_health,
     api_key_summary,
     build_body,
     get_fixed_list,
     looks_like_api_key,
+    normalize_api_key,
     push_text,
 )
 from .formatter import build_card
@@ -177,10 +180,32 @@ def swapped_secrets(device_id: str, api_key: str) -> bool:
     return bool(device_id) and looks_like_api_key(device_id)
 
 
+def api_key_shape_lines(api_key: str) -> list:
+    """Key 形状的可疑点（不回显密钥内容），供日志与自检展示。"""
+    health = api_key_health(api_key)
+    return list(health["problems"])
+
+
+def warn_api_key_shape(api_key: str) -> None:
+    """发送前就把"这不像 Dot API Key"讲清楚，省掉一轮 400。"""
+    problems = api_key_shape_lines(api_key)
+    if not problems:
+        return
+    print("⚠️ DOT_API_KEY 的形态与官方格式不符（仍会照发，但很可能被拒）：",
+          file=sys.stderr)
+    for item in problems:
+        print(f"  · {item}", file=sys.stderr)
+    print("  官方格式见 https://dot.mindreset.tech/docs/service/open/text_api"
+          "（Authorization: Bearer dot_app_<64 位>）", file=sys.stderr)
+
+
 def api_key_rejected_hint(api_key: str, device_id: str) -> None:
     """HTTP 400/401「This API key is invalid」的定向排查清单。"""
-    print("提示：Dot 云明确判定 API Key 无效（不是权限问题，也不是设备问题）。", file=sys.stderr)
+    print("提示：Dot 云明确判定 API Key 无效（不是权限问题，也不是设备问题）。",
+          file=sys.stderr)
     print(f"  实际发送的 Key：{api_key_summary(api_key)}", file=sys.stderr)
+    for item in api_key_shape_lines(api_key):
+        print(f"  ⚠️ {item}", file=sys.stderr)
     if swapped_secrets(device_id, api_key):
         print(
             "  ⚠️ 你的 DOT_DEVICE_ID 看起来是 API Key —— 两个 Secret 很可能填反了。",
@@ -265,14 +290,19 @@ def cmd_push(args) -> int:
         print(CREDENTIAL_HINT, file=sys.stderr)
         return 2
 
+    warn_api_key_shape(api_key)
+    form_notes: list = []
     try:
         message = push_text(
             body,
             device_id=device_id,
             api_key=api_key,
             timeout=float(args.timeout),
+            note=form_notes,
         )
     except DotAPIError as exc:
+        for line in form_notes:
+            print(f"[zhangyu] {line}", file=sys.stderr)
         print(f"推送失败：{exc}", file=sys.stderr)
         if exc.status in (400, 401):
             api_key_rejected_hint(api_key, device_id)
@@ -307,6 +337,8 @@ def cmd_push(args) -> int:
     except OSError as exc:
         print(f"[zhangyu] 警告：状态文件写入失败 ({exc})，不影响推送结果", file=sys.stderr)
 
+    for line in form_notes:
+        print(f"[zhangyu] {line}")
     _print_card(card, fortune)
     print(f"✅ 已推送 → 设备 {device_id}")
     print(f"Dot 云返回：{message}")
@@ -356,6 +388,8 @@ def cmd_doctor(args) -> int:
     print(f"- DOT_API_KEY: {'已设置 ✅' if api_key else '未设置 ❌（推送时必需）'}")
     if api_key:
         print(f"    · Key 指纹: {api_key_summary(api_key)}")
+        for item in api_key_shape_lines(api_key):
+            print(f"    · ⚠️ {item}")
     if swapped_secrets(device_id, api_key):
         print(
             "    · ⚠️ device_id 看起来是 API Key —— 两个 Secret 可能填反了"
@@ -371,8 +405,25 @@ def cmd_doctor(args) -> int:
             print("- Key 有效性: 跳过（凭据不全）")
         else:
             try:
-                get_fixed_list(device_id=device_id, api_key=api_key, timeout=10.0)
-                print("- Key 有效性: ✅ Dot 云接受了该 Key 与设备序列号")
+                tried = []
+                accepted = None
+                for token in api_key_candidates(api_key):
+                    form = "补前缀" if token == normalize_api_key(api_key) else "原值"
+                    tried.append(form)
+                    try:
+                        accepted = get_fixed_list(
+                            device_id=device_id, api_key=token, timeout=10.0
+                        )
+                    except DotAPIError as exc:
+                        if exc.status in (400, 401):
+                            continue
+                        raise
+                if accepted is None and len(tried) > 1:
+                    raise DotAPIError(400, "两种 Key 形态都被 Dot 云判为无效")
+                if accepted is None:  # 只有一种形态且失败
+                    raise DotAPIError(400, "Dot 云判为无效")
+                print("- Key 有效性: ✅ Dot 云接受了该 Key 与设备序列号"
+                      + (f"（{tried[-1]}形态）" if len(tried) > 1 else ""))
             except DotAPIError as exc:
                 if exc.status is None:
                     # 连不上/超时：不能据此断言 Key 无效（CI 里网络抖动很常见）
