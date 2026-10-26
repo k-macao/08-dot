@@ -374,7 +374,12 @@ def cmd_doctor(args) -> int:
                 get_fixed_list(device_id=device_id, api_key=api_key, timeout=10.0)
                 print("- Key 有效性: ✅ Dot 云接受了该 Key 与设备序列号")
             except DotAPIError as exc:
-                print(f"- Key 有效性: ❌ {exc}")
+                if exc.status is None:
+                    # 连不上/超时：不能据此断言 Key 无效（CI 里网络抖动很常见）
+                    print(f"- Key 有效性: ⚠️ 无法判定（{exc.message}）")
+                    print("  → 网络或 Dot 服务临时不可用，换个时间重试即可")
+                else:
+                    print(f"- Key 有效性: ❌ {exc}")
                 if exc.status in (400, 401):
                     print("  → Key 本身无效（生成/复制/失效问题，见下方清单）")
                     api_key_rejected_hint(api_key, device_id)

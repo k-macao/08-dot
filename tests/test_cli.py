@@ -203,3 +203,22 @@ class ApiKeyRejectedTest(CLITestCase):
         code, out, _ = self.run_cli("doctor", "--check-key")
         self.assertEqual(code, 0)
         self.assertIn("跳过", out)
+
+
+class CheckKeyNetworkTest(CLITestCase):
+    def test_network_error_is_inconclusive_not_invalid(self):
+        """连不上 Dot 云时不能断言 Key 无效（CI 里网络抖动很常见）。"""
+        from unittest import mock
+        from zhangyu.dot_client import DotAPIError
+
+        self.write_config({"device_id": "ABCD1234ABCD"})
+        os.environ["DOT_API_KEY"] = "dot_app_abcdefabcdefabcdef"
+        with mock.patch.object(
+            cli, "get_fixed_list",
+            side_effect=DotAPIError(None, "网络错误: timed out"),
+        ):
+            code, out, err = self.run_cli("doctor", "--check-key")
+        self.assertEqual(code, 0)
+        self.assertIn("无法判定", out)
+        self.assertNotIn("Key 本身无效", out)
+        self.assertNotIn("重新生成", err)
