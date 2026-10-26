@@ -168,10 +168,31 @@ python3 run_daily.py signs                  # 列出全部星座写法
 3. 本地 `python run_daily.py doctor --require-credentials` 与 CI 的预检等价，
    退出码 2 表示凭据不全（默认 `doctor` 不会因为缺凭据而失败）。
 
+### API Key 到底长什么样（对着长度自查最快）
+
+官方 Text API 文档里的认证头是 `Authorization: Bearer dot_app_<64 位>`，
+所以**合法 token 是 72 个字符**：
+
+| 形态 | 长度 | 例 |
+| --- | --- | --- |
+| ✅ 完整 token | **72** | `dot_app_UlSpzXNEXhYZ…QxbY`（`dot_app_` 8 + 载荷 64） |
+| ⚠️ 只有载荷 | 64 | 少了 `dot_app_`，本工具会自动补 |
+| ⚠️ 不是 Dot 的 Key | 其它 | 例如 68 位：既不是 64 也不是 72，多为复制到别的东西 |
+
+`doctor` / 推送日志会直接打印「你的值 N 字符，补前缀后 M 字符，官方示例 72」，
+以及是否像 GitHub（`ghp_`）、OpenAI（`sk-`）、JWT（`eyJ`）等其它服务的 token。
+
+> 还有一个**决定性**的自查办法：Dot. App → **API Key** 列表会显示每个 Key 的
+> **创建时间与最近使用时间**。如果刚跑完 CI、那个 Key 的「最近使用时间」没有更新，
+> 说明请求里带的根本不是这个 Key（Secret 里放的是别的东西）；反之说明 Key 用的是对的，
+> 失败原因就在别处。
+
 **排障：`HTTP 400 This API key is invalid. Check the key and try again.`**
 
 请求已经发出去了，是 Dot 云判定 **Key 本身无效**（不是权限、也不是设备问题）。按顺序核对：
 
+0. **先量长度**：合法 token 是 72 字符（`dot_app_` + 64）。若 `doctor` 报「没有前缀 / 位数不对」，
+   说明贴进去的不是 Dot 的 Key（或只贴了一半），重新从 App 复制完整值；
 1. **重新导出一遍**：Dot. App → 导出 API Key，重新生成通常会让旧 Key **立即作废**；
 2. **别带污染**：复制时把引号、空格、`Bearer ` 一起带进 Secret 是最常见的坑
    （本工具会就地清理并打印「已清理 引号/Bearer 前缀」，但仍建议原样粘贴）；
@@ -183,6 +204,9 @@ python3 run_daily.py signs                  # 列出全部星座写法
 
 `doctor` 打印的「Key 指纹」只包含**长度与结构特征**（是否带 `dot_app_` 前缀、清理了什么），
 永远不会回显密钥内容。
+
+推送时若「补前缀」形态被判 400/401，会自动用**原值**再试一次（有些面板导出的值已自带
+前缀规则），成功时会打印「服务端接受的是原值形态」——这样"其实只差个前缀"不会再被误判成 Key 失效。
 
 ### 方式 B：本地 crontab
 
@@ -217,7 +241,7 @@ python3 run_daily.py signs                  # 列出全部星座写法
 python3 -m unittest discover -s tests -v
 ```
 
-52 项单测覆盖：星座解析、真实响应 fixture 解析与水印清理、排版/截断/星级、离线引擎确定性、Dot 客户端请求形态（本地 mock HTTP 服务，校验路径/鉴权/请求体）与错误码处理，CLI 契约（凭据缺失时的行为、`--show-payload` / `--dry-run` 语义、占位 device_id、幂等跳过），以及 API Key 清洗（引号/空白/`Bearer ` 前缀）与无效 Key 的排查提示。
+67 项单测覆盖：星座解析、真实响应 fixture 解析与水印清理、排版/截断/星级、离线引擎确定性、Dot 客户端请求形态（本地 mock HTTP 服务，校验路径/鉴权/请求体）与错误码处理，CLI 契约（凭据缺失时的行为、`--show-payload` / `--dry-run` 语义、占位 device_id、幂等跳过），API Key 清洗（引号/空白/`Bearer ` 前缀）、Key 形态软校验（72 字符 / 前缀 / 异种 token）与补前缀失败自动换形重试，以及无效 Key 的排查提示。
 
 ## 常见问题
 
@@ -249,7 +273,7 @@ python3 -m unittest discover -s tests -v
 │   ├── dot_client.py              # Dot Text API 客户端（认证/重试/错误码）
 │   └── cli.py                     # push / preview / signs / doctor
 ├── .github/workflows/daily-push.yml  # 每日定时推送（UTC 23:00 = 07:00 京/澳）
-├── tests/                         # 52 项单测 + 真实接口 fixture
+├── tests/                         # 67 项单测 + 真实接口 fixture
 ├── requirements.txt               # 零依赖说明
 └── .gitignore                     # 排除 config.json / data/ / logs/
 ```

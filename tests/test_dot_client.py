@@ -5,6 +5,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from zhangyu.dot_client import (
     DotAPIError,
+    api_key_candidates,
+    api_key_health,
     api_key_summary,
     build_body,
     clean_api_key,
@@ -25,6 +27,8 @@ class _Handler(BaseHTTPRequestHandler):
     records = []
     status = 200
     reply = {"message": "Device ABCD1234ABCD text API content switched."}
+    # 模拟"服务端只认原值形态（不带 dot_app_ 前缀）"，用于验证自动换形重试
+    reject_prefixed = False
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -37,8 +41,15 @@ class _Handler(BaseHTTPRequestHandler):
                 "body": json.loads(body.decode("utf-8")) if body else None,
             }
         )
-        payload = json.dumps(_Handler.reply).encode("utf-8")
-        self.send_response(_Handler.status)
+        auth = self.headers.get("Authorization") or ""
+        if _Handler.reject_prefixed and auth.startswith("Bearer dot_app_"):
+            payload = json.dumps(
+                {"message": "This API key is invalid. Check the key and try again."}
+            ).encode("utf-8")
+            self.send_response(400)
+        else:
+            payload = json.dumps(_Handler.reply).encode("utf-8")
+            self.send_response(_Handler.status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
@@ -64,6 +75,7 @@ class DotClientTest(unittest.TestCase):
     def setUp(self):
         _Handler.records = []
         _Handler.status = 200
+        _Handler.reject_prefixed = False
         _Handler.reply = {"message": "Device ABCD1234ABCD text API content switched."}
 
     def _card(self):
@@ -188,6 +200,81 @@ class ApiKeyCleaningTest(unittest.TestCase):
         self.assertTrue(looks_like_api_key("dot_dev_abc123"))
         self.assertFalse(looks_like_api_key("ABCD1234ABCD"))
         self.assertFalse(looks_like_api_key(""))
+
+
+class ApiKeyShapeTest(unittest.TestCase):
+    """按官方文档的 token 形状做软校验：dot_app_ + 64 位 = 72 字符。"""
+
+    REAL = "dot_app_" + "U" * 64
+
+    def test_real_format_is_clean(self):
+        health = api_key_health(self.REAL)
+        self.assertTrue(health["looks_valid"])
+        self.assertTrue(health["has_prefix"])
+        self.assertEqual(health["body_len"], 64)
+        self.assertEqual(health["expected_total_len"], 72)
+
+    def test_missing_prefix_is_reported_with_numbers(self):
+        health = api_key_health("x" * 68)
+        self.assertFalse(health["looks_valid"])
+        joined = " ".join(health["problems"])
+        self.assertIn("没有 dot_app_ 前缀", joined)
+        self.assertIn("68", joined)
+        self.assertIn("76", joined)   # 补前缀后的长度
+        self.assertIn("64", joined)   # 官方 payload 位数
+
+    def test_bare_payload_is_flagged_but_fixable(self):
+        health = api_key_health("U" * 64)
+        self.assertEqual(health["body_len"], 64)
+        self.assertFalse(health["has_prefix"])
+        self.assertEqual(api_key_candidates("U" * 64)[0], self.REAL)
+
+    def test_foreign_token_detected_by_charset(self):
+        health = api_key_health("ghp_" + "a1b2c3d4e5f6" * 4)
+        self.assertIn("其它服务的 token", " ".join(health["problems"]))
+
+    def test_candidates_dedupe_when_already_prefixed(self):
+        self.assertEqual(api_key_candidates(self.REAL), [self.REAL])
+
+    def test_candidates_offer_both_forms(self):
+        forms = api_key_candidates("U" * 64)
+        self.assertEqual(len(forms), 2)
+        self.assertEqual(forms[0], self.REAL)
+        self.assertEqual(forms[1], "U" * 64)
+
+
+class ApiKeyFormFallbackTest(DotClientTest):
+    """补前缀被拒（400）时自动改用原值重试。"""
+
+    def test_falls_back_to_raw_form(self):
+        _Handler.reject_prefixed = True
+        note = []
+        message = push_text(
+            build_body({"title": "T", "message": "M"}),
+            device_id="ABCD1234ABCD",
+            api_key="U" * 64,
+            base_url=self.base_url,
+            retries=1,
+            note=note,
+        )
+        self.assertIn("switched", message)
+        self.assertEqual(len(_Handler.records), 2)
+        self.assertTrue(_Handler.records[0]["authorization"].startswith("Bearer dot_app_"))
+        self.assertEqual(_Handler.records[1]["authorization"], "Bearer " + "U" * 64)
+        self.assertTrue(any("原值" in line for line in note))
+
+    def test_both_forms_rejected_raises_400(self):
+        _Handler.reject_prefixed = True
+        with self.assertRaises(DotAPIError):
+            push_text(
+                build_body({"title": "T", "message": "M"}),
+                device_id="ABCD1234ABCD",
+                api_key="dot_app_" + "U" * 64,
+                base_url=self.base_url,
+                retries=1,
+            )
+        # 已经是规范形态，无需换形
+        self.assertEqual(len(_Handler.records), 1)
 
 
 if __name__ == "__main__":
