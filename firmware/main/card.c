@@ -223,10 +223,12 @@ void card_show(fortune_t *f, const char *title, const char *date_line)
     fb_clear(&s_fb);
 
     int y = 4;
-    fb_draw_centered(&s_fb, y, title, true);
-    y += 20;
-    fb_hline(&s_fb, M, y, CW);
-    y += 5;
+    if (title && title[0]) {
+        fb_draw_centered(&s_fb, y, title, true);
+        y += 20;
+        fb_hline(&s_fb, M, y, CW);
+        y += 5;
+    }
 
     char line[160];
     snprintf(line, sizeof(line), "%s · %s", f->sign_cn, f->period);

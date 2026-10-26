@@ -126,8 +126,25 @@ class IdempotencyTest(CLITestCase):
         self.assertIn("device_id", err)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class NoTitleTest(CLITestCase):
+    def test_preview_no_title_omits_title_line(self):
+        """--no-title 时预览不打印「标题：」，且 JSON 里 title 为空串。"""
+        import re
+
+        code, out, _ = self.run_cli("preview", "--no-title", "--json")
+        self.assertEqual(code, 0)
+        self.assertNotIn("标题：", out)
+        m = re.search(r'"title"\s*:\s*"([^"]*)"', out)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), "")
+
+    def test_push_no_title_body_without_title_field(self):
+        """--show-payload --dry-run --no-title 时请求体里不含 title。"""
+        code, out, _ = self.run_cli("push", "--dry-run", "--show-payload", "--no-title")
+        self.assertEqual(code, 0)
+        self.assertIn('"taskType"', out)
+        self.assertNotIn('"title"', out)
+        self.assertNotIn("标题：", out)
 
 
 class ApiKeyRejectedTest(CLITestCase):
@@ -323,3 +340,7 @@ class KeyFormMemoryTest(CLITestCase):
         path = self.tmp / "state.json"
         path.write_text(json.dumps({"key_form": "raw"}), encoding="utf-8")
         self.assertEqual(cli.state_key_form(path), "prefixed")
+
+
+if __name__ == "__main__":
+    unittest.main()
