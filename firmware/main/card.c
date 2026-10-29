@@ -318,8 +318,7 @@ void card_show_setup(const char *title)
         "打开串口终端",       /* 96 */
         "串口 115200",        /* 90 */
         "输入 wifi 名称 密码", /* 133 */
-        "sign 狮子座 固定",    /* 116 */
-        "sign random 抽签",   /* 124 */
+        "星座固定 狮子座",    /* 116 */
         "输入 help 看命令",    /* 119 */
     };
     for (size_t i = 0; i < sizeof(lines) / sizeof(lines[0]); i++) {

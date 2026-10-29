@@ -5,6 +5,7 @@
 连请求体都没打印出来 —— 这两个开关本来是用来排查这种问题的。
 """
 
+import datetime as dt
 import io
 import json
 import os
@@ -52,6 +53,67 @@ class CLITestCase(unittest.TestCase):
         with redirect_stdout(out), redirect_stderr(err):
             code = cli.main([*argv, "--config", str(self.config)])
         return code, out.getvalue(), err.getvalue()
+
+
+class LeoOnlyTest(CLITestCase):
+    """显示星座是产品固定项，旧配置/环境/命令行都不能切回抽签。"""
+
+    def test_defaults_are_fixed_leo(self):
+        self.assertEqual(cli.DEFAULTS["sign_mode"], "fixed")
+        self.assertEqual(cli.DEFAULTS["sign"], "leo")
+        self.assertEqual(cli.resolve_sign({}, None, dt.date(2026, 10, 29)).key, "leo")
+
+    def test_legacy_random_config_and_env_still_preview_leo(self):
+        self.write_config({"sign_mode": "random", "sign": "aries"})
+        os.environ["ZHANGYU_SIGN"] = "virgo"
+        code, out, err = self.run_cli("preview", "--provider", "offline")
+        self.assertEqual(code, 0)
+        self.assertIn("♌ 狮子座 · 今日运势", out)
+        self.assertNotIn("白羊座 ·", out)
+        self.assertNotIn("处女座 ·", out)
+        self.assertIn("固定显示狮子座", err)
+        cfg = cli.load_config(str(self.config))
+        self.assertEqual((cfg["sign_mode"], cfg["sign"]), ("fixed", "leo"))
+
+    def test_push_dry_run_payload_is_leo(self):
+        self.write_config({"sign_mode": "random", "sign": "pisces"})
+        code, out, _ = self.run_cli("push", "--dry-run", "--show-payload", "--provider", "offline")
+        self.assertEqual(code, 0)
+        self.assertIn("♌ 狮子座 · 今日运势", out)
+        self.assertNotIn("双鱼座 ·", out)
+        self.assertIn("[dry-run]", out)
+
+    def test_other_sign_and_random_cli_overrides_are_rejected(self):
+        for value in ("aries", "virgo", "random"):
+            with self.subTest(value=value), self.assertRaises(SystemExit) as raised:
+                self.run_cli("preview", "--sign", value, "--provider", "offline")
+            self.assertIn("固定为狮子座", str(raised.exception))
+
+    def test_leo_aliases_are_accepted(self):
+        for value in ("leo", "狮子座", "獅子座", "♌"):
+            with self.subTest(value=value):
+                code, out, _ = self.run_cli("preview", "--sign", value, "--provider", "offline")
+                self.assertEqual(code, 0)
+                self.assertIn("♌ 狮子座 · 今日运势", out)
+
+    def test_doctor_reports_fixed_leo(self):
+        self.write_config({"sign_mode": "random", "sign": "aries"})
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 0)
+        self.assertIn("sign_mode: fixed", out)
+        self.assertIn("显示星座: 狮子座 (leo，固定)", out)
+        self.assertNotIn("今日抽签星座", out)
+
+    def test_signs_command_lists_only_leo(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = cli.main(["signs"])
+        out = out.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("leo", out)
+        self.assertIn("狮子座", out)
+        self.assertNotIn("aries", out)
+        self.assertIn("固定显示狮子座", out)
 
 
 class PayloadFlagTest(CLITestCase):
@@ -108,10 +170,42 @@ class IdempotencyTest(CLITestCase):
         from zoneinfo import ZoneInfo
 
         today = datetime.now(ZoneInfo("Asia/Macau")).date().isoformat()
-        state.write_text(json.dumps({"last_push_date": today}), encoding="utf-8")
+        state.write_text(json.dumps({"last_push_date": today, "sign": "leo"}), encoding="utf-8")
         code, out, _ = self.run_cli("push")
         self.assertEqual(code, 0)
         self.assertIn("已推送过", out)
+
+    def test_same_day_other_sign_does_not_block_leo_migration(self):
+        state = self.tmp / "state.json"
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        today = datetime.now(ZoneInfo("Asia/Macau")).date().isoformat()
+        state.write_text(json.dumps({"last_push_date": today, "sign": "aries"}), encoding="utf-8")
+        code, out, err = self.run_cli("push")
+        self.assertEqual(code, 2)  # reaches credential validation instead of skipping
+        self.assertNotIn("已推送过", out)
+        self.assertIn("device_id", err)
+
+    def test_same_day_migration_pushes_and_records_leo(self):
+        from datetime import datetime
+        from unittest import mock
+        from zoneinfo import ZoneInfo
+
+        today = datetime.now(ZoneInfo("Asia/Macau")).date().isoformat()
+        state = self.tmp / "state.json"
+        state.write_text(json.dumps({"last_push_date": today, "sign": "aries"}), encoding="utf-8")
+        self.write_config({"device_id": "ABCD1234"})
+        os.environ["DOT_API_KEY"] = "dot_app_fake"
+        with mock.patch.object(cli, "push_text", return_value="ok") as push, \
+             mock.patch.object(cli, "resolve_content_target", return_value=("loop", None)):
+            code, out, _ = self.run_cli("push", "--provider", "offline")
+        self.assertEqual(code, 0)
+        push.assert_called_once()
+        self.assertIn("♌ 狮子座 · 今日运势", out)
+        saved = json.loads(state.read_text(encoding="utf-8"))
+        self.assertEqual(saved["sign"], "leo")
+        self.assertEqual(saved["last_push_date"], today)
 
     def test_force_bypasses_skip(self):
         """--force 时不能因为状态文件而提前返回（这里会因缺凭据而退出 2）。"""

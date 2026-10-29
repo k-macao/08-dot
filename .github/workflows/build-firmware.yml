@@ -128,6 +128,7 @@ jobs:
         run: |
           set -euo pipefail
           cd firmware
+          python3 -m unittest discover -s ../tests -p 'test_firmware_config.py' -v
           python3 tools/gen_font.py --check
           python3 tools/preview_card.py --widths --max-width 144
           python3 tools/preview_card.py            # → build/preview/*.png
@@ -191,7 +192,7 @@ jobs:
             2. 连接 USB 打开串口终端 (115200):  python -m esptool --chip esp32c3 -b 115200 monitor
                或 idf.py monitor / screen /dev/ttyACM0 115200
             3. 输入:  wifi <SSID> [密码]
-               可选:  sign 狮子座  或  sign random
+               星座固定: 狮子座 (旧 NVS 抽签设置会自动迁移, WiFi 保留)
             4. 保存后自动联网 → 显示今日运势 → 深度休眠, 之后每天 07:00 自动更新
 
           注意: 自定义固件会覆盖出厂固件 (保修失效, 见官方 custom-firmware-guide)

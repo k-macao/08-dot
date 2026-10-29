@@ -6,10 +6,6 @@ on:
     - cron: "0 23 * * *"
   workflow_dispatch:
     inputs:
-      sign:
-        description: "星座（留空则按仓库配置抽签，如 leo / 狮子座 / random）"
-        required: false
-        default: ""
       dry_run:
         description: "只预览（排版 + 请求体，不推送，无需任何凭据）"
         type: boolean
@@ -37,7 +33,6 @@ jobs:
         env:
           DOT_API_KEY: ${{ secrets.DOT_API_KEY }}
           DOT_DEVICE_ID: ${{ secrets.DOT_DEVICE_ID || vars.DOT_DEVICE_ID }}
-          ZHANGYU_SIGN: ${{ vars.ZHANGYU_SIGN || github.event.inputs.sign }}
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             echo "::notice::dry_run=true — 跳过凭据硬校验，本次不会推送设备"
@@ -87,8 +82,7 @@ jobs:
           #   DOT_DEVICE_ID  设备序列号（Secret 或 Variable 均可）
           DOT_API_KEY: ${{ secrets.DOT_API_KEY }}
           DOT_DEVICE_ID: ${{ secrets.DOT_DEVICE_ID || vars.DOT_DEVICE_ID }}
-          # 可选的仓库变量：固定星座（不设则按 config/抽签）
-          ZHANGYU_SIGN: ${{ vars.ZHANGYU_SIGN || github.event.inputs.sign }}
+          # 星座固定为狮子座；旧 ZHANGYU_SIGN 变量不再覆盖显示策略。
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             python run_daily.py push --dry-run --show-payload

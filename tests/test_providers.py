@@ -1,7 +1,9 @@
 import datetime as dt
 import unittest
+from unittest import mock
 
-from zhangyu.providers import fetch_offline, parse_xxapi, strip_watermark
+from zhangyu import providers
+from zhangyu.providers import ProviderError, fetch_offline, get_fortune, parse_xxapi, strip_watermark
 from zhangyu.signs import parse_sign
 
 
@@ -41,6 +43,24 @@ class XxapiParseTest(unittest.TestCase):
         # 水印被清除
         self.assertNotIn("星", fortune.overall[-4:])
         self.assertTrue(fortune.overall.endswith("积极可控。"))
+
+    def test_missing_name_keeps_requested_leo(self):
+        payload = self._load()
+        payload["data"].pop("name")
+        fortune = parse_xxapi(payload, parse_sign("leo"), TODAY)
+        self.assertEqual(fortune.sign.key, "leo")
+
+    def test_wrong_sign_response_is_rejected_not_relabeled(self):
+        with self.assertRaisesRegex(ProviderError, "与请求的 狮子座 不符"):
+            parse_xxapi(self._load(), parse_sign("leo"), TODAY)
+
+    def test_wrong_sign_response_falls_back_to_leo_offline(self):
+        with mock.patch.object(providers, "_http_get_json", return_value=self._load()), \
+             mock.patch("sys.stderr"):
+            fortune = get_fortune(parse_sign("leo"), TODAY, providers=["xxapi", "offline"])
+        self.assertEqual(fortune.sign.key, "leo")
+        self.assertTrue(fortune.offline)
+        self.assertIn("经降级", fortune.source)
 
     def test_parse_error_payload(self):
         from zhangyu.providers import ProviderError

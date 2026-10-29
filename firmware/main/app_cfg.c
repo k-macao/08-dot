@@ -1,9 +1,11 @@
 /**
  * @file app_cfg.c
- * @brief NVS 配置读写（WiFi / 抽签模式 / 唤醒计数）
+ * @brief NVS 配置读写（WiFi / 固定狮子座 / 唤醒计数）
  */
 #include "app_cfg.h"
+#include "fortune.h"
 
+#include <stdbool.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -45,15 +47,26 @@ esp_err_t app_cfg_load(app_cfg_t *cfg)
     }
 
     /* menuconfig 默认值播种（CI 构建时可直接烧入 WiFi） */
-    if (cfg->ssid[0] == 0 && CONFIG_ZHANGYU_WIFI_SSID[0] != 0) {
+    bool seed_wifi = (cfg->ssid[0] == 0 && CONFIG_ZHANGYU_WIFI_SSID[0] != 0);
+    if (seed_wifi) {
         snprintf(cfg->ssid, sizeof(cfg->ssid), "%s", CONFIG_ZHANGYU_WIFI_SSID);
         snprintf(cfg->pass, sizeof(cfg->pass), "%s", CONFIG_ZHANGYU_WIFI_PASSWORD);
-        app_cfg_save(cfg);
         ESP_LOGI(TAG, "已从 menuconfig 播种 WiFi 配置");
     }
-    if (cfg->sign_mode[0] == 0) {
-        snprintf(cfg->sign_mode, sizeof(cfg->sign_mode), "%s", CONFIG_ZHANGYU_SIGN_MODE);
-        snprintf(cfg->sign, sizeof(cfg->sign), "%s", CONFIG_ZHANGYU_SIGN);
+
+    /* 每次启动都执行显示策略，而不只是在 NVS 为空时播种：
+     * 旧固件保存的 random/其他星座不能覆盖「只显示狮子座」。
+     * 只改星座键，保留已配好的 WiFi；迁移后写回，避免每次启动重复写。 */
+    bool migrate_sign = strcmp(cfg->sign_mode, "fixed") != 0 ||
+                        strcmp(cfg->sign, DISPLAY_SIGN_KEY) != 0;
+    snprintf(cfg->sign_mode, sizeof(cfg->sign_mode), "fixed");
+    snprintf(cfg->sign, sizeof(cfg->sign), "%s", DISPLAY_SIGN_KEY);
+    if (seed_wifi || migrate_sign) {
+        esp_err_t save_err = app_cfg_save(cfg);
+        if (save_err != ESP_OK) {
+            ESP_LOGW(TAG, "配置保存失败: %s（本次仍使用狮子座）",
+                     esp_err_to_name(save_err));
+        }
     }
     ESP_LOGI(TAG, "配置: ssid=%s mode=%s sign=%s",
              cfg->ssid[0] ? cfg->ssid : "(未设置)", cfg->sign_mode, cfg->sign);

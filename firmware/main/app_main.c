@@ -104,24 +104,9 @@ static void run_daily(app_cfg_t *cfg)
     char date_line[48];
     date_line_build(date_line, sizeof(date_line), wake);
 
-    /* 决定本次占卜的星座: fixed 指定 / random 每日抽签(同日幂等) */
-    int idx = -1;
-    if (strcmp(cfg->sign_mode, "fixed") == 0) {
-        idx = fortune_sign_index(cfg->sign);
-    }
-    if (idx < 0) {
-        if (now > TIME_VALID_TS) {
-            struct tm t;
-            localtime_r(&now, &t);
-            uint32_t seed = (uint32_t)((t.tm_year + 1900) * 10000 +
-                                       (t.tm_mon + 1) * 100 + t.tm_mday);
-            seed ^= 0x5F3759DFu;
-            idx = (int)((seed * 2654435761u) >> 8) % SIGN_COUNT;
-        } else {
-            idx = wake % SIGN_COUNT;
-        }
-    }
-    const char *key = fortune_sign_key(idx);
+    /* 产品固定只显示狮子座；旧 NVS 抽签设置已在 app_cfg_load 迁移。 */
+    int idx = DISPLAY_SIGN_INDEX;
+    const char *key = DISPLAY_SIGN_KEY;
     ESP_LOGI(TAG, "本次占卜: %s (%s) | 网络=%d | %s", fortune_sign_cn(idx), key,
              (int)net, date_line);
 

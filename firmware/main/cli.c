@@ -1,6 +1,6 @@
 /**
  * @file cli.c
- * @brief USB 串口配置命令行（首次启动配网 / 星座设置）
+ * @brief USB 串口配置命令行（首次启动配网，星座固定狮子座）
  */
 #include "cli.h"
 
@@ -58,7 +58,7 @@ static void print_banner(const app_cfg_t *cfg)
            cfg->ssid[0] ? cfg->ssid : "(未设置)", cfg->sign_mode, cfg->sign);
     printf(" 命令:\n");
     printf("   wifi <SSID> [密码]   保存 WiFi 并开始占卜 (同一行用空格分隔)\n");
-    printf("   sign <星座|random>   固定星座 / 每日抽签\n");
+    printf("   sign <leo|狮子座>    确认固定星座 (不再支持抽签)\n");
     printf("   show                 显示当前配置\n");
     printf("   forget               清除 WiFi (回到配网)\n");
     printf("   go                   立即执行(已配置时)\n");
@@ -100,25 +100,14 @@ void cli_run(app_cfg_t *cfg)
             printf("尚未配置 WiFi, 请先: wifi <SSID> [密码]\n");
         } else if (strcmp(cmd, "sign") == 0) {
             if (!rest || !rest[0]) {
-                printf("用法: sign <aries..pisces|中文名|random>\n");
+                printf("用法: sign <leo|狮子座>\n");
                 continue;
             }
-            if (strcmp(rest, "random") == 0) {
-                snprintf(cfg->sign_mode, sizeof(cfg->sign_mode), "random");
-                app_cfg_save(cfg);
-                printf("已设置: 每日抽签\n");
-            } else {
-                int idx = fortune_sign_index(rest);
-                if (idx < 0) {
-                    printf("无法识别星座 %s (如: leo / 狮子座)\n", rest);
-                    continue;
-                }
-                snprintf(cfg->sign_mode, sizeof(cfg->sign_mode), "fixed");
-                snprintf(cfg->sign, sizeof(cfg->sign), "%s", fortune_sign_key(idx));
-                app_cfg_save(cfg);
-                printf("已设置: 固定 %s (%s)\n", fortune_sign_cn(idx),
-                       fortune_sign_key(idx));
+            if (fortune_sign_index(rest) != DISPLAY_SIGN_INDEX) {
+                printf("星座固定为狮子座，不支持 random 或其他星座\n");
+                continue;
             }
+            printf("已固定: 狮子座 (leo)，无需重复设置\n");
         } else if (strcmp(cmd, "wifi") == 0) {
             if (!rest || !rest[0]) {
                 printf("用法: wifi <SSID> [密码]\n");
