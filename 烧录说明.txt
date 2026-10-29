@@ -1,0 +1,20 @@
+章鱼AI.每日占一占 — 烧录方法 (Quote/0, ESP32-C3)
+================================================
+方式一: 单文件整片烧录 (推荐)
+  pip install esptool
+  esptool.py --chip esp32c3 -p /dev/ttyACM0 erase_flash
+  esptool.py --chip esp32c3 -p /dev/ttyACM0 write_flash 0x0 zhangyu_daily_full.bin
+
+方式二: 分区烧录 (等价)
+  esptool.py --chip esp32c3 -p /dev/ttyACM0 write_flash \
+    0x0 bootloader.bin 0x8000 partition-table.bin 0x10000 zhangyu_daily.bin
+
+烧录后首次启动:
+  1. 屏幕显示「等待配置 WiFi」
+  2. 连接 USB 打开串口终端 (115200):  python -m esptool --chip esp32c3 -b 115200 monitor
+     或 idf.py monitor / screen /dev/ttyACM0 115200
+  3. 输入:  wifi <SSID> [密码]
+     星座固定: 狮子座 (旧 NVS 抽签设置会自动迁移, WiFi 保留)
+  4. 保存后自动联网 → 显示今日运势 → 深度休眠, 之后每天 07:00 自动更新
+
+注意: 自定义固件会覆盖出厂固件 (保修失效, 见官方 custom-firmware-guide)
