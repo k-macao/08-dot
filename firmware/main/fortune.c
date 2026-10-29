@@ -49,6 +49,11 @@ int fortune_sign_index(const char *name)
             return i;
         }
     }
+    /* 繁体「獅子座 / 獅子」；用 UTF-8 字节避免给屏幕字库增加繁体字形。 */
+    if (strcmp(name, "\xE7\x8D\x85\xE5\xAD\x90\xE5\xBA\xA7") == 0 ||
+        strcmp(name, "\xE7\x8D\x85\xE5\xAD\x90") == 0) {
+        return DISPLAY_SIGN_INDEX;
+    }
     /* 中文简称: 「白羊」= 6 字节, 全名「白羊座」= 9 字节 */
     size_t n = strlen(name);
     if (n == 6) {
@@ -217,13 +222,18 @@ static bool fetch_xxapi(const char *sign_key, fortune_t *f)
         return false;
     }
 
-    memset(f, 0, sizeof(*f));
-    const char *name = NULL;
     const cJSON *name_item = cJSON_GetObjectItemCaseSensitive(data, "name");
-    if (cJSON_IsString(name_item)) {
-        name = name_item->valuestring;
+    if (cJSON_IsString(name_item) && name_item->valuestring) {
+        int returned_idx = fortune_sign_index(name_item->valuestring);
+        if (returned_idx >= 0 && returned_idx != fortune_sign_index(sign_key)) {
+            ESP_LOGW(TAG, "xxapi 返回星座与请求不符，尝试下一源");
+            cJSON_Delete(root);
+            return false;
+        }
     }
-    fill_sign(f, name ? name : sign_key);
+    memset(f, 0, sizeof(*f));
+    /* 始终标记请求的星座，不能因上游名称缺失/异常而显示成白羊座。 */
+    fill_sign(f, sign_key);
 
     jstr(data, "type", f->period, sizeof(f->period), false);
     jstr(data, "shortcomment", f->comment, sizeof(f->comment), true);

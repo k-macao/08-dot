@@ -102,11 +102,14 @@ def parse_xxapi(payload: dict, sign: Sign, date: dt.date) -> Fortune:
         raise ProviderError(f"xxapi 返回异常: {payload.get('msg')!r}")
 
     data = payload["data"]
-    # 返回体里的 name/title 可能更准确；无法识别时沿用入参星座
+    # 上游返回了另一个星座时不能贴错标签；拒绝该响应，让统一入口降级。
+    # 未提供名称时沿用请求星座，保持对旧接口响应的兼容。
     try:
         actual = get_sign(str(data.get("name", "")).strip()) if data.get("name") else sign
     except ValueError:
         actual = sign
+    if actual.key != sign.key:
+        raise ProviderError(f"xxapi 返回星座 {actual.cn} 与请求的 {sign.cn} 不符")
 
     scores_raw = data.get("fortune") or {}
     indices_raw = data.get("index") or {}

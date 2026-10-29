@@ -1,9 +1,9 @@
 """章鱼AI.每日占一占 — 命令行入口。
 
 用法：
-    python run_daily.py push      [--sign leo|狮子座|random] [--style brief|full]
+    python run_daily.py push      [--style brief|full]  # 固定狮子座
                                   [--dry-run] [--show-payload] [--force]
-    python run_daily.py preview   [--sign ...] [--fixture path.json] [--provider offline]
+    python run_daily.py preview   [--fixture path.json] [--provider offline]
     python run_daily.py signs
     python run_daily.py doctor    [--require-credentials]   # CI 预检用
 
@@ -38,7 +38,7 @@ from .dot_client import (
 )
 from .formatter import build_card
 from .providers import Fortune, get_fortune, parse_xxapi
-from .signs import SIGNS, parse_sign, random_sign
+from .signs import Sign, get_sign, parse_sign
 
 # --------------------------------------------------------------------------- #
 # 配置
@@ -48,8 +48,8 @@ DEFAULTS: Dict[str, Any] = {
     "device_id": "",
     "title": APP_NAME,
     "brand": "章鱼AI",
-    "sign_mode": "random",  # random=每日抽签 | fixed=固定星座
-    "sign": "aries",  # sign_mode=fixed 时生效
+    "sign_mode": "fixed",  # 兼容保留；显示星座固定为狮子座
+    "sign": "leo",  # 旧配置中的其他星座会被覆盖
     "style": "brief",  # brief | full
     "max_chars": 90,
     "task_type": "loop",  # loop | fixed
@@ -89,9 +89,13 @@ def load_config(path: Optional[str]) -> Dict[str, Any]:
     # 环境变量覆盖（密钥类只走环境变量）
     if os.environ.get("DOT_DEVICE_ID"):
         cfg["device_id"] = os.environ["DOT_DEVICE_ID"].strip()
+    # 星座是产品固定项，旧配置/环境变量的 random 或其他星座不能改变它。
+    if cfg.get("sign_mode") != "fixed" or cfg.get("sign") != "leo":
+        print("[zhangyu] 已忽略旧星座设置；卡片固定显示狮子座。", file=sys.stderr)
     if os.environ.get("ZHANGYU_SIGN"):
-        cfg["sign"] = os.environ["ZHANGYU_SIGN"].strip()
-        cfg["sign_mode"] = "fixed"
+        print("[zhangyu] 已忽略 ZHANGYU_SIGN；卡片固定显示狮子座。", file=sys.stderr)
+    cfg["sign_mode"] = "fixed"
+    cfg["sign"] = "leo"
     if os.environ.get("ZHANGYU_STYLE"):
         cfg["style"] = os.environ["ZHANGYU_STYLE"].strip()
     if os.environ.get("ZHANGYU_TITLE"):
@@ -108,16 +112,13 @@ def local_today(tz_name: str) -> dt.date:
     return dt.datetime.now(tz).date()
 
 
-def resolve_sign(cfg: Dict[str, Any], arg: Optional[str], today: dt.date):
-    """决定本次要“占”的星座：命令行 > 环境/配置 > random 抽签。"""
-    if arg and arg.lower() != "random":
-        return parse_sign(arg)
-    if arg and arg.lower() == "random":
-        return random_sign(seed=f"{today.isoformat()}|zhangyu")
-    if str(cfg.get("sign_mode", "random")).lower() == "fixed":
-        return parse_sign(str(cfg.get("sign") or "aries"))
-    # 每日抽签：同一天多次运行结果一致（幂等）
-    return random_sign(seed=f"{today.isoformat()}|zhangyu")
+def resolve_sign(cfg: Dict[str, Any], arg: Optional[str], today: dt.date) -> Sign:
+    """固定狮子座，不再每日抽签。cfg/today/arg 保留以兼容旧调用。"""
+    leo = get_sign("leo")
+    if arg:
+        if arg.strip().lower() == "random" or parse_sign(arg).key != leo.key:
+            raise SystemExit("星座已固定为狮子座，不支持随机抽签或其他星座；请移除 --sign 或使用 --sign leo。")
+    return leo
 
 
 def load_fortune(sign, today: dt.date, cfg: Dict[str, Any], args) -> Fortune:
@@ -400,8 +401,9 @@ def cmd_push(args) -> int:
             state = json.loads(state_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             state = {}
-        if state.get("last_push_date") == today.isoformat():
-            print(f"[zhangyu] 今日 ({today.isoformat()}) 已推送过，跳过；如需重推加 --force")
+        if (state.get("last_push_date") == today.isoformat()
+                and state.get("sign") == sign.key):
+            print(f"[zhangyu] 今日 ({today.isoformat()}) 已推送过 {sign.cn}，跳过；如需重推加 --force")
             return 0
 
     if problems:
@@ -500,9 +502,9 @@ def cmd_preview(args) -> int:
 def cmd_signs(_args) -> int:
     print(f"{'key':<12}{'中文名':<8}{'符号':<4}日期范围")
     print("-" * 40)
-    for s in SIGNS:
-        print(f"{s.key:<12}{s.cn:<8}{s.symbol:<4}{s.date_range}")
-    print("\nsign_mode=random 时每天自动抽签；fixed 时取配置中的 sign。")
+    s = get_sign("leo")
+    print(f"{s.key:<12}{s.cn:<8}{s.symbol:<4}{s.date_range}")
+    print("\n本项目固定显示狮子座，不再每日抽签。")
     return 0
 
 
@@ -592,7 +594,7 @@ def cmd_doctor(args) -> int:
     print(f"- sign_mode: {cfg['sign_mode']}  style: {cfg['style']}  task_type: {cfg['task_type']}")
 
     sign = resolve_sign(cfg, None, today)
-    print(f"- 今日抽签星座: {sign.cn} ({sign.key})")
+    print(f"- 显示星座: {sign.cn} ({sign.key}，固定)")
     try:
         fortune = get_fortune(sign, today, providers=cfg.get("providers"), timeout=10.0)
         print(f"- 数据源: {fortune.source} ✅")
@@ -609,7 +611,7 @@ def cmd_doctor(args) -> int:
 
 def _add_common(sp: argparse.ArgumentParser) -> None:
     sp.add_argument("--config", help="配置文件路径（默认 ./config.json，不存在则用内置默认值）")
-    sp.add_argument("--sign", help="星座：英文/中文/符号，或 random（覆盖配置）")
+    sp.add_argument("--sign", help="兼容旧命令，仅接受 leo / 狮子座 / 獅子座 / ♌；固定显示狮子座")
     sp.add_argument("--style", choices=["brief", "full"], help="卡片样式（覆盖配置）")
     sp.add_argument("--max-chars", dest="max_chars", type=int, help="综合运势最大字数（覆盖配置）")
     sp.add_argument("--fixture", help="使用本地 xxapi 响应 JSON 文件（离线调试）")
@@ -646,7 +648,7 @@ def main(argv=None) -> int:
     )
     p_preview.add_argument("--json", action="store_true", help="额外输出 JSON 形式的卡片")
 
-    sub.add_parser("signs", help="列出全部星座及识别写法")
+    sub.add_parser("signs", help="显示固定星座（狮子座）")
 
     p_doctor = sub.add_parser("doctor", help="环境自检")
     p_doctor.add_argument("--config", help="配置文件路径")

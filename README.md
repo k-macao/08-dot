@@ -2,6 +2,8 @@
 
 > 每日占星运程 → Dot 硬件设备（Quote/0 等）墨水屏卡片，卡片标题：**章鱼AI.每日占一占**
 >
+> **星座固定为狮子座（leo）**：云端推送与独立固件均不再每日抽签；旧的随机/其他星座设置会被忽略，固件升级保留 WiFi 配置。
+>
 > 两条实现路线（可并存）：
 >
 > | 路线 | 说明 | 入口 |
@@ -70,28 +72,33 @@
 一次 `python3 run_daily.py push` 完成：
 
 1. **定时触发**（见下文“每日定时”）或手动执行；
-2. 决定星座：`sign_mode=random` 每日抽签（同日幂等）或 `fixed` 固定星座（支持中文/英文/符号，`--sign` 可覆盖）；
+2. 固定取**狮子座**运势（旧配置、`ZHANGYU_SIGN` 和随机抽签不能覆盖；`--sign` 仅兼容 `leo` / 狮子座 / 獅子座 / ♌）；
 3. 按数据源优先级取**今日运势**；
 4. 排版为 Text API 卡片（`title` / `message` / `signature`）；
-5. 幂等检查（`data/state.json` 记录当天已推送则跳过，`--force` 强制重推）；
+5. 幂等检查（`data/state.json` 记录当天已推送狮子座则跳过，旧的其他星座记录不阻塞迁移，`--force` 强制重推）；
 6. `POST …/device/{id}/text`（带重试），成功后写状态文件并打印卡片。
 
-### 卡片效果（真实接口数据预览）
+### 卡片效果（狮子座预览）
+
+运行 `python3 run_daily.py preview --provider offline` 可在本地查看狮子座卡片，
+例如（离线引擎示意，线上数据每天更新）：
 
 ```text
 ==============================================
 标题：章鱼AI.每日占一占
 ----------------------------------------------
-♈ 白羊座 · 今日运势
-「积累自身实力」★★★★☆ 73%
-今日整体运势处于平稳向上的状态，日常事务推进顺畅，无突发变故干扰。……矛盾冲突…
-爱情 56% · 事业 84% · 财运 14% · 健康 34%
-宜 整理闲置物品 · 忌 沉迷刷短视频
-幸运 草绿 · 17 · 贵人 狮子座
+♌ 狮子座 · 今日运势
+「轻装上阵」★★★★★ 97%
+旧事重提不是为了翻篇，而是为了轻装；把结论写下来，心就定了。
+爱情 97% · 事业 85% · 财运 66% · 健康 56%
+宜 记录今天的小确幸 · 忌 替人做承诺
+幸运 墨黑 · 2 · 贵人 双子座
 ----------------------------------------------
-签名：2026年10月26日 星期一 · 章鱼AI
+签名：2026年10月29日 星期四 · 章鱼AI
 ==============================================
 ```
+
+> 固定的只是**运势所属星座**；数据源提供的「贵人星座」仍可能不同。
 
 `--style full` 还会追加爱情/事业/财运/健康四段详细文本。
 
@@ -112,7 +119,7 @@
 
 ```bash
 cp config.example.json config.json    # 已在 .gitignore 中，不会提交
-# 编辑 config.json：device_id、sign_mode/sign、style 等
+# 编辑 config.json：device_id、style 等（星座固定为狮子座）
 export DOT_API_KEY='dot_app_xxxxxxxxx'   # API Key 只走环境变量
 ```
 
@@ -120,7 +127,7 @@ export DOT_API_KEY='dot_app_xxxxxxxxx'   # API Key 只走环境变量
 
 ```bash
 python3 run_daily.py doctor                 # 环境自检
-python3 run_daily.py preview --sign 狮子座   # 预览排版（不推送）
+python3 run_daily.py preview                # 预览狮子座排版（不推送）
 python3 run_daily.py push --dry-run         # 走完整流水线但不调用 Dot 云
 python3 run_daily.py push                   # ✅ 真实推送到设备
 ```
@@ -128,8 +135,7 @@ python3 run_daily.py push                   # ✅ 真实推送到设备
 常用参数：
 
 ```bash
-python3 run_daily.py push --sign libra      # 指定天秤座（本次）
-python3 run_daily.py push --sign random     # 指定每日抽签
+python3 run_daily.py push --sign leo        # 兼容写法，仍固定狮子座
 python3 run_daily.py push --style full      # 完整四段式
 python3 run_daily.py push --force           # 忽略当天幂等，强制重推
 python3 run_daily.py push --no-title        # 卡片不带标题（配合 config title: "" 也可）
@@ -138,7 +144,7 @@ python3 run_daily.py push --dry-run --show-payload   # 只看排版+请求体，
 python3 run_daily.py push --provider xxapi  # 只用某个数据源
 python3 run_daily.py preview --sign 狮子座 --no-title   # 无标题预览（不推送）
 python3 run_daily.py doctor --check-key     # 真调只读接口验证 API Key 是否有效
-python3 run_daily.py signs                  # 列出全部星座写法
+python3 run_daily.py signs                  # 查看固定星座（狮子座）
 ```
 
 ## 每日定时（任务 3 的“每日”）
@@ -146,7 +152,7 @@ python3 run_daily.py signs                  # 列出全部星座写法
 ### 方式 A：GitHub Actions（推荐，仓库已在 GitHub 上）
 
 工作流：[.github/workflows/daily-push.yml](.github/workflows/daily-push.yml)
-每天 **UTC 23:00（北京/澳门次日 07:00）** 自动运行“单测 → 推送”，并支持手动触发（可传入星座）。
+每天 **UTC 23:00（北京/澳门次日 07:00）** 自动运行“单测 → 推送”，并支持手动触发（星座固定为狮子座）。
 
 一次性配置（仓库 **Settings → Secrets and variables → Actions**）：
 
@@ -154,7 +160,7 @@ python3 run_daily.py signs                  # 列出全部星座写法
 | --- | --- | --- |
 | `DOT_API_KEY` | **Secret**（只放 Secret） | Dot. App 导出的 API Key，形如 `dot_app_xxx` |
 | `DOT_DEVICE_ID` | Secret **或** Variable | 设备序列号（工作流两处都会读，放错页面也能跑） |
-| `ZHANGYU_SIGN` | Variable（可选） | 固定星座，如 `leo`；不设则按抽签 |
+| `ZHANGYU_SIGN` | 不再使用 | 旧变量会被忽略，无需删除；显示星座固定为 `leo` |
 
 > 工作流第一步是 **Preflight（凭据自检）**：凭据缺失会立刻以
 > `::error::` 注释 + Job Summary 给出配置位置，而不是等到推送时才报一句
@@ -247,8 +253,8 @@ python3 run_daily.py doctor --check-content
 | --- | --- | --- |
 | `device_id` | `""` | 设备序列号；环境变量 `DOT_DEVICE_ID` 优先 |
 | `title` | `章鱼AI.每日占一占` | 卡片标题；设为 `""`（或 CLI 传 `--no-title`）时卡片不带标题，Text API 也不发 `title` 字段 |
-| `sign_mode` | `random` | `random`＝每日抽签 / `fixed`＝固定 `sign` |
-| `sign` | `aries` | `fixed` 模式下的星座（中/英/符号均可） |
+| `sign_mode` | `fixed` | 兼容保留；运行时固定为 `fixed`，旧 `random` 设置不生效 |
+| `sign` | `leo` | 兼容保留；运行时固定为狮子座，其他值不生效 |
 | `style` | `brief` | `brief` 精简 / `full` 含四段详细文本 |
 | `max_chars` | `90` | 综合运势截断长度（尽量断在句读处） |
 | `task_type` | `loop` | `loop` 循环列表 / `fixed` 固定列表 |
@@ -265,7 +271,7 @@ python3 run_daily.py doctor --check-content
 python3 -m unittest discover -s tests -v
 ```
 
-74 项单测覆盖：星座解析、真实响应 fixture 解析与水印清理、排版/截断/星级、离线引擎确定性、Dot 客户端请求形态（本地 mock HTTP 服务，校验路径/鉴权/请求体）与错误码处理，CLI 契约（凭据缺失时的行为、`--show-payload` / `--dry-run` 语义、占位 device_id、幂等跳过），API Key 清洗（引号/空白/`Bearer ` 前缀）、Key 形态软校验（72 字符 / 前缀 / 异种 token）与补前缀失败自动换形重试，Key 形态记忆、列表查询与内容槽位自动选择（loop/fixed），以及无效 Key 的排查提示。
+单测覆盖：固定狮子座策略与旧 NVS 迁移、星座解析、真实响应 fixture 解析与水印清理、排版/截断/星级、离线引擎确定性、Dot 客户端请求形态（本地 mock HTTP 服务，校验路径/鉴权/请求体）与错误码处理，CLI 契约（凭据缺失时的行为、`--show-payload` / `--dry-run` 语义、占位 device_id、幂等跳过），API Key 清洗（引号/空白/`Bearer ` 前缀）、Key 形态软校验（72 字符 / 前缀 / 异种 token）与补前缀失败自动换形重试，Key 形态记忆、列表查询与内容槽位自动选择（loop/fixed），以及无效 Key 的排查提示。
 
 ## 常见问题
 
@@ -291,13 +297,13 @@ python3 -m unittest discover -s tests -v
 ├── config.example.json            # 配置模板（复制为 config.json）
 ├── run_daily.py                   # 入口：python3 run_daily.py <cmd>
 ├── zhangyu/
-│   ├── signs.py                   # 十二星座元数据与解析（中/英/符号/别名）
+│   ├── signs.py                   # 星座元数据与解析（显示固定狮子座）
 │   ├── providers.py               # 数据源：xxapi → freehoroscope → 离线兜底
 │   ├── formatter.py               # Text API 卡片排版（title/message/signature）
 │   ├── dot_client.py              # Dot Text API 客户端（认证/重试/错误码）
 │   └── cli.py                     # push / preview / signs / doctor
 ├── .github/workflows/daily-push.yml  # 每日定时推送（UTC 23:00 = 07:00 京/澳）
-├── tests/                         # 74 项单测 + 真实接口 fixture
+├── tests/                         # 单测 + 真实接口 fixture
 ├── requirements.txt               # 零依赖说明
 └── .gitignore                     # 排除 config.json / data/ / logs/
 ```

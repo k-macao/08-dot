@@ -43,6 +43,8 @@ _EXTRA_ALIASES = {
     "山羊座": "capricorn",
     "天平座": "libra",
     "蝎座": "scorpio",
+    "獅子座": "leo",
+    "獅子": "leo",
 }
 
 

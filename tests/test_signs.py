@@ -22,6 +22,8 @@ class ParseSignTest(unittest.TestCase):
     def test_parse_aliases(self):
         self.assertEqual(parse_sign("天平座").key, "libra")
         self.assertEqual(parse_sign("魔羯座").key, "capricorn")
+        self.assertEqual(parse_sign("獅子座").key, "leo")
+        self.assertEqual(parse_sign("獅子").key, "leo")
 
     def test_parse_invalid_raises(self):
         with self.assertRaises(ValueError):

@@ -8,6 +8,8 @@ extern "C" {
 #endif
 
 #define SIGN_COUNT 12
+#define DISPLAY_SIGN_KEY "leo"
+#define DISPLAY_SIGN_INDEX 4
 
 typedef struct {
     char sign_key[12];  /* aries.. */

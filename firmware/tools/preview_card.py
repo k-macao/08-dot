@@ -134,8 +134,8 @@ static void case_offline(void)
 {
     fortune_t f;
     memset(&f, 0, sizeof f);
-    strcpy(f.sign_key, "pisces");
-    strcpy(f.sign_cn, "双鱼座");
+    strcpy(f.sign_key, "leo");
+    strcpy(f.sign_cn, "狮子座");
     strcpy(f.period, "今日运势");
     f.score = 3;
     strcpy(f.comment, "静待花开");
@@ -243,7 +243,7 @@ def main() -> int:
     if args.widths or args.text:
         texts = args.text if args.text else [
             "等待配置 WiFi", "连接 USB 到电脑", "打开串口终端", "串口 115200",
-            "输入 wifi 名称 密码", "sign 狮子座 固定", "sign random 抽签",
+            "输入 wifi 名称 密码", "星座固定 狮子座",
             "输入 help 看命令", "每日 07:00 自动更新",
         ]
         with tempfile.TemporaryDirectory() as td:
