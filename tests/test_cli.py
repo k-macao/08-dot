@@ -1,28 +1,34 @@
-"""CLI 契约测试：凭据缺失时的行为、--show-payload / --dry-run 语义。
+"""CLI 契约测试：行情夹具下的排版/推送、凭据缺失行为、幂等、交易时段门控。
 
-复现的现场：GitHub Actions 里没配 DOT_DEVICE_ID，
-`python run_daily.py push --show-payload` 直接以退出码 2 结束，
-连请求体都没打印出来 —— 这两个开关本来是用来排查这种问题的。
+离线保障：配置里永远带 fixture（测试数据），Dot 云的
+get_task_list / get_fixed_list 在 setUp 中统一打桩 —— 测试不发真实网络请求。
 """
 
 import datetime as dt
 import io
 import json
 import os
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
+from zoneinfo import ZoneInfo
 
 from zhangyu import cli
+
+FIXTURE = str(Path(__file__).parent / "fixtures" / "quotes_em.json")
 
 CLEAN_ENV = (
     "DOT_DEVICE_ID",
     "DOT_API_KEY",
-    "ZHANGYU_SIGN",
-    "ZHANGYU_STYLE",
     "ZHANGYU_TITLE",
+    "ZHANGYU_SOURCE",
+    "ZHANGYU_KEY_FORM",
 )
+
+GOOD_KEY = "dot_app_" + "U" * 64
 
 
 class CLITestCase(unittest.TestCase):
@@ -31,8 +37,16 @@ class CLITestCase(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
         self.config = self.tmp / "config.json"
-        # 只走离线引擎 + 状态文件放进临时目录：不联网、不污染仓库
+        # 行情走夹具 + 状态文件进临时目录：不联网、不污染仓库
         self.write_config({})
+        # 内容列表查询打桩（push/doctor 解析目标槽位时默认不联网）
+        self._p0 = mock.patch.object(cli, "get_task_list", return_value=[])
+        self._p1 = mock.patch.object(cli, "get_fixed_list",
+                                     return_value={"data": []})
+        self._p0.start()
+        self._p1.start()
+        self.addCleanup(self._p1.stop)
+        self.addCleanup(self._p0.stop)
 
     def tearDown(self):
         os.environ.update(self._env)
@@ -40,9 +54,7 @@ class CLITestCase(unittest.TestCase):
 
     def write_config(self, extra):
         cfg = {
-            "sign_mode": "fixed",
-            "sign": "leo",
-            "providers": ["offline"],
+            "fixture": FIXTURE,
             "state_file": str(self.tmp / "state.json"),
         }
         cfg.update(extra)
@@ -54,66 +66,74 @@ class CLITestCase(unittest.TestCase):
             code = cli.main([*argv, "--config", str(self.config)])
         return code, out.getvalue(), err.getvalue()
 
+    # 常用小工具 -----------------------------------------------------------
+    def write_state(self, **extra):
+        path = self.tmp / "state.json"
+        path.write_text(json.dumps(extra, ensure_ascii=False), encoding="utf-8")
+        return path
 
-class LeoOnlyTest(CLITestCase):
-    """显示星座是产品固定项，旧配置/环境/命令行都不能切回抽签。"""
+    @staticmethod
+    def _ago(minutes):
+        now = dt.datetime.now(ZoneInfo("Asia/Macau"))
+        return (now - dt.timedelta(minutes=minutes)).isoformat(timespec="seconds")
 
-    def test_defaults_are_fixed_leo(self):
-        self.assertEqual(cli.DEFAULTS["sign_mode"], "fixed")
-        self.assertEqual(cli.DEFAULTS["sign"], "leo")
-        self.assertEqual(cli.resolve_sign({}, None, dt.date(2026, 10, 29)).key, "leo")
 
-    def test_legacy_random_config_and_env_still_preview_leo(self):
-        self.write_config({"sign_mode": "random", "sign": "aries"})
-        os.environ["ZHANGYU_SIGN"] = "virgo"
-        code, out, err = self.run_cli("preview", "--provider", "offline")
+class DefaultsTest(CLITestCase):
+    def test_default_title_and_source(self):
+        self.assertEqual(cli.DEFAULTS["title"], "章鱼AI.行情速报")
+        self.assertEqual(cli.DEFAULTS["source"], "auto")
+        self.assertEqual(cli.DEFAULTS["task_type"], "loop")
+
+    def test_version_and_app_name(self):
+        from zhangyu import APP_NAME, __version__
+        self.assertEqual(APP_NAME, "章鱼AI.行情速报")
+        self.assertEqual(__version__, "2.0.0")
+
+    def test_indices_command_lists_all(self):
+        code, out, _ = self.run_cli("indices")
         self.assertEqual(code, 0)
-        self.assertIn("♌ 狮子座 · 今日运势", out)
-        self.assertNotIn("白羊座 ·", out)
-        self.assertNotIn("处女座 ·", out)
-        self.assertIn("固定显示狮子座", err)
-        cfg = cli.load_config(str(self.config))
-        self.assertEqual((cfg["sign_mode"], cfg["sign"]), ("fixed", "leo"))
+        for key in ("sh", "hstech", "dji", "spx"):
+            self.assertIn(key, out)
+        self.assertIn("124.HSTECH", out)   # 恒生科技的东财市场号
+        self.assertIn("gb_$dji", out)
+        self.assertIn("共 10 项", out)
 
-    def test_push_dry_run_payload_is_leo(self):
-        self.write_config({"sign_mode": "random", "sign": "pisces"})
-        code, out, _ = self.run_cli("push", "--dry-run", "--show-payload", "--provider", "offline")
+
+class PreviewTest(CLITestCase):
+    def test_preview_shows_three_groups_and_quotes(self):
+        code, out, _ = self.run_cli("preview")
         self.assertEqual(code, 0)
-        self.assertIn("♌ 狮子座 · 今日运势", out)
-        self.assertNotIn("双鱼座 ·", out)
-        self.assertIn("[dry-run]", out)
+        for header in ("A股", "港股", "美股"):
+            self.assertIn(header, out)
+        self.assertIn("上证 3888.12 +0.56%", out)
+        self.assertIn("恒生科技 5678.90 -0.66%", out)
+        self.assertIn("标普500 5890.12 +0.18%", out)
+        self.assertIn("数据源：fixture(东财)", out)
+        self.assertIn("10 项", out)
 
-    def test_other_sign_and_random_cli_overrides_are_rejected(self):
-        for value in ("aries", "virgo", "random"):
-            with self.subTest(value=value), self.assertRaises(SystemExit) as raised:
-                self.run_cli("preview", "--sign", value, "--provider", "offline")
-            self.assertIn("固定为狮子座", str(raised.exception))
-
-    def test_leo_aliases_are_accepted(self):
-        for value in ("leo", "狮子座", "獅子座", "♌"):
-            with self.subTest(value=value):
-                code, out, _ = self.run_cli("preview", "--sign", value, "--provider", "offline")
-                self.assertEqual(code, 0)
-                self.assertIn("♌ 狮子座 · 今日运势", out)
-
-    def test_doctor_reports_fixed_leo(self):
-        self.write_config({"sign_mode": "random", "sign": "aries"})
-        code, out, _ = self.run_cli("doctor")
+    def test_preview_title_from_config(self):
+        self.write_config({"title": "自定义标题"})
+        code, out, _ = self.run_cli("preview")
         self.assertEqual(code, 0)
-        self.assertIn("sign_mode: fixed", out)
-        self.assertIn("显示星座: 狮子座 (leo，固定)", out)
-        self.assertNotIn("今日抽签星座", out)
+        self.assertIn("标题：自定义标题", out)
 
-    def test_signs_command_lists_only_leo(self):
-        out = io.StringIO()
-        with redirect_stdout(out):
-            code = cli.main(["signs"])
-        out = out.getvalue()
+    def test_preview_bad_fixture_fails_cleanly(self):
+        self.write_config({"fixture": str(self.tmp / "nope.json")})
+        code, _, err = self.run_cli("preview")
+        self.assertEqual(code, 1)
+        self.assertIn("行情获取失败", err)
+
+    def test_fixture_flag_overrides_config(self):
+        # 归一化格式的夹具也能用（load_fixture 双格式）
+        norm = self.tmp / "norm.json"
+        norm.write_text(json.dumps({
+            "source": "fixture(手工)",
+            "quotes": [{"key": "sh", "price": 3001.5, "pct": 1.25}],
+        }), encoding="utf-8")
+        code, out, _ = self.run_cli("preview", "--fixture", str(norm))
         self.assertEqual(code, 0)
-        self.assertIn("leo", out)
-        self.assertIn("狮子座", out)
-        self.assertNotIn("aries", out)
-        self.assertIn("固定显示狮子座", out)
+        self.assertIn("上证 3001.50 +1.25%", out)
+        self.assertIn("数据源：fixture(手工)", out)
 
 
 class PayloadFlagTest(CLITestCase):
@@ -128,14 +148,13 @@ class PayloadFlagTest(CLITestCase):
         self.assertIn("DOT_DEVICE_ID", err)  # 提示里给到 CI 的配置位置
 
     def test_dry_run_with_payload_needs_no_credentials(self):
-        """--dry-run 是纯本地预览，没有凭据也必须成功退出。"""
         code, out, _ = self.run_cli("push", "--dry-run", "--show-payload")
         self.assertEqual(code, 0)
         self.assertIn('"taskType"', out)
         self.assertIn("[dry-run]", out)
+        self.assertIn("上证 3888.12 +0.56%", out)  # 卡片也打印了
 
     def test_placeholder_device_id_is_treated_as_missing(self):
-        """照抄 config.example.json 的占位值不应打到 Dot 云换一个 404。"""
         self.write_config({"device_id": "YOUR_DEVICE_SERIAL_NUMBER"})
         os.environ["DOT_API_KEY"] = "dot_app_fake"
         code, _, err = self.run_cli("push")
@@ -157,74 +176,115 @@ class PayloadFlagTest(CLITestCase):
         self.assertIn("ABCD1234 ✅", out)
 
     def test_doctor_without_flag_still_exits_zero(self):
-        """默认 doctor 是"看看就好"，不能因为没配密钥就让本地自检失败。"""
+        """默认 doctor 是"看看就好"，没配密钥也不能让自检失败。"""
         code, out, _ = self.run_cli("doctor")
         self.assertEqual(code, 0)
         self.assertIn("未配置", out)
 
+    def test_doctor_reports_quotes_and_trading_window(self):
+        code, out, _ = self.run_cli("doctor")
+        self.assertEqual(code, 0)
+        self.assertIn("交易时段", out)
+        self.assertIn("行情源", out)
+        self.assertIn("10 项", out)
+        self.assertIn("卡片排版", out)
+
 
 class IdempotencyTest(CLITestCase):
-    def test_same_day_skip(self):
-        state = self.tmp / "state.json"
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
+    """每小时一更：50 分钟内的重触发跳过，--force 可穿透。"""
 
-        today = datetime.now(ZoneInfo("Asia/Macau")).date().isoformat()
-        state.write_text(json.dumps({"last_push_date": today, "sign": "leo"}), encoding="utf-8")
+    def test_recent_push_skips(self):
+        self.write_state(last_push_at=self._ago(10))
+        with mock.patch.object(cli, "push_text", return_value="ok") as push:
+            code, out, _ = self.run_cli("push")
+        self.assertEqual(code, 0)
+        self.assertIn("已推送过", out)
+        push.assert_not_called()
+
+    def test_stale_push_goes_through(self):
+        self.write_config({"device_id": "ABCD1234"})
+        os.environ["DOT_API_KEY"] = GOOD_KEY
+        self.write_state(last_push_at=self._ago(120))
+        with mock.patch.object(cli, "push_text", return_value="ok") as push:
+            code, out, _ = self.run_cli("push")
+        self.assertEqual(code, 0)
+        push.assert_called_once()
+        self.assertIn("已推送", out)
+        saved = json.loads((self.tmp / "state.json").read_text(encoding="utf-8"))
+        # 状态被刷新为本次推送时间（不是旧时间）
+        self.assertNotEqual(saved["last_push_at"], self._ago(120))
+
+    def test_recent_but_no_credentials_still_skips_before_error(self):
+        self.write_state(last_push_at=self._ago(5))
         code, out, _ = self.run_cli("push")
         self.assertEqual(code, 0)
         self.assertIn("已推送过", out)
 
-    def test_same_day_other_sign_does_not_block_leo_migration(self):
-        state = self.tmp / "state.json"
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
-        today = datetime.now(ZoneInfo("Asia/Macau")).date().isoformat()
-        state.write_text(json.dumps({"last_push_date": today, "sign": "aries"}), encoding="utf-8")
-        code, out, err = self.run_cli("push")
-        self.assertEqual(code, 2)  # reaches credential validation instead of skipping
-        self.assertNotIn("已推送过", out)
+    def test_force_bypasses_recent_skip(self):
+        self.write_state(last_push_at=self._ago(5))
+        code, _, err = self.run_cli("push", "--force")
+        self.assertEqual(code, 2)  # 穿透了幂等 → 走到凭据校验
+        self.assertNotIn("已推送过", err)
         self.assertIn("device_id", err)
 
-    def test_same_day_migration_pushes_and_records_leo(self):
-        from datetime import datetime
-        from unittest import mock
-        from zoneinfo import ZoneInfo
+    def test_legacy_last_push_date_does_not_block(self):
+        # 旧格式（按日幂等）不拦小时级推送
+        today = dt.datetime.now(ZoneInfo("Asia/Macau")).date().isoformat()
+        self.write_state(last_push_date=today, sign="leo")
+        code, _, err = self.run_cli("push")
+        self.assertEqual(code, 2)
+        self.assertNotIn("已推送过", err)
+        self.assertIn("device_id", err)
 
-        today = datetime.now(ZoneInfo("Asia/Macau")).date().isoformat()
-        state = self.tmp / "state.json"
-        state.write_text(json.dumps({"last_push_date": today, "sign": "aries"}), encoding="utf-8")
+    def test_force_with_credentials_pushes(self):
         self.write_config({"device_id": "ABCD1234"})
-        os.environ["DOT_API_KEY"] = "dot_app_fake"
-        with mock.patch.object(cli, "push_text", return_value="ok") as push, \
-             mock.patch.object(cli, "resolve_content_target", return_value=("loop", None)):
-            code, out, _ = self.run_cli("push", "--provider", "offline")
+        os.environ["DOT_API_KEY"] = GOOD_KEY
+        self.write_state(last_push_at=self._ago(5))
+        with mock.patch.object(cli, "push_text", return_value="ok") as push:
+            code, _, _ = self.run_cli("push", "--force")
         self.assertEqual(code, 0)
         push.assert_called_once()
-        self.assertIn("♌ 狮子座 · 今日运势", out)
-        saved = json.loads(state.read_text(encoding="utf-8"))
-        self.assertEqual(saved["sign"], "leo")
-        self.assertEqual(saved["last_push_date"], today)
 
-    def test_force_bypasses_skip(self):
-        """--force 时不能因为状态文件而提前返回（这里会因缺凭据而退出 2）。"""
-        state = self.tmp / "state.json"
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
 
-        today = datetime.now(ZoneInfo("Asia/Macau")).date().isoformat()
-        state.write_text(json.dumps({"last_push_date": today}), encoding="utf-8")
-        code, _, err = self.run_cli("push", "--force")
-        self.assertEqual(code, 2)
+class TradingOnlyTest(CLITestCase):
+    """--trading-only：休市直接跳过（退出码 0），盘中照常推送。"""
+
+    def test_outside_window_skips_without_pushing(self):
+        with mock.patch.object(cli, "in_trading_window", return_value=None), \
+             mock.patch.object(cli, "push_text", return_value="ok") as push:
+            code, out, _ = self.run_cli("push", "--trading-only")
+        self.assertEqual(code, 0)
+        self.assertIn("非交易时段", out)
+        self.assertIn("跳过", out)
+        push.assert_not_called()
+
+    def test_inside_window_pushes(self):
+        self.write_config({"device_id": "ABCD1234"})
+        os.environ["DOT_API_KEY"] = GOOD_KEY
+        with mock.patch.object(cli, "in_trading_window", return_value="A股/港股"), \
+             mock.patch.object(cli, "push_text", return_value="ok") as push:
+            code, _, _ = self.run_cli("push", "--trading-only")
+        self.assertEqual(code, 0)
+        push.assert_called_once()
+
+    def test_dry_run_bypasses_gate(self):
+        with mock.patch.object(cli, "in_trading_window", return_value=None):
+            code, out, _ = self.run_cli("push", "--trading-only", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("[dry-run]", out)
+
+    def test_gate_not_applied_without_flag(self):
+        # 手动推送不带 --trading-only → 不查交易时段（走到凭据校验才对）
+        with mock.patch.object(cli, "in_trading_window",
+                               side_effect=AssertionError("不该被调用")):
+            code, out, err = self.run_cli("push")
+        self.assertEqual(code, 2)      # 凭据缺失错误 —— 说明没被门控拦下
+        self.assertNotIn("非交易时段", out + err)
         self.assertIn("device_id", err)
 
 
 class NoTitleTest(CLITestCase):
     def test_preview_no_title_omits_title_line(self):
-        """--no-title 时预览不打印「标题：」，且 JSON 里 title 为空串。"""
-        import re
-
         code, out, _ = self.run_cli("preview", "--no-title", "--json")
         self.assertEqual(code, 0)
         self.assertNotIn("标题：", out)
@@ -233,7 +293,6 @@ class NoTitleTest(CLITestCase):
         self.assertEqual(m.group(1), "")
 
     def test_push_no_title_body_without_title_field(self):
-        """--show-payload --dry-run --no-title 时请求体里不含 title。"""
         code, out, _ = self.run_cli("push", "--dry-run", "--show-payload", "--no-title")
         self.assertEqual(code, 0)
         self.assertIn('"taskType"', out)
@@ -250,14 +309,13 @@ class ApiKeyRejectedTest(CLITestCase):
         os.environ["DOT_API_KEY"] = '"dot_app_deadbeefdeadbeef"'
 
     def _patch_push(self, exc):
-        from unittest import mock
-
         return mock.patch.object(cli, "push_text", side_effect=exc)
 
     def test_invalid_key_prints_targeted_hint(self):
         from zhangyu.dot_client import DotAPIError
 
-        with self._patch_push(DotAPIError(400, "This API key is invalid. Check the key and try again.")):
+        with self._patch_push(DotAPIError(
+                400, "This API key is invalid. Check the key and try again.")):
             code, _, err = self.run_cli("push")
         self.assertEqual(code, 1)
         self.assertIn("This API key is invalid", err)
@@ -265,8 +323,7 @@ class ApiKeyRejectedTest(CLITestCase):
         self.assertIn("已清理", err)          # 提示我们清掉了引号
         self.assertIn("重新生成", err)         # 失效 Key 的处理
         self.assertIn("doctor --check-key", err)
-        # 绝不回显密钥本体
-        self.assertNotIn("deadbeef", err)
+        self.assertNotIn("deadbeef", err)     # 绝不回显密钥本体
 
     def test_swapped_secrets_are_called_out(self):
         from zhangyu.dot_client import DotAPIError
@@ -287,15 +344,12 @@ class ApiKeyRejectedTest(CLITestCase):
         self.assertNotIn("填反", err)
 
     def test_check_key_ok_against_mock_cloud(self):
-        from unittest import mock
-
         with mock.patch.object(cli, "get_fixed_list", return_value={"data": []}):
             code, out, _ = self.run_cli("doctor", "--check-key")
         self.assertEqual(code, 0)
         self.assertIn("Key 有效性: ✅", out)
 
     def test_check_key_invalid_reports_and_hints(self):
-        from unittest import mock
         from zhangyu.dot_client import DotAPIError
 
         with mock.patch.object(
@@ -319,7 +373,6 @@ class ApiKeyRejectedTest(CLITestCase):
 class CheckKeyNetworkTest(CLITestCase):
     def test_network_error_is_inconclusive_not_invalid(self):
         """连不上 Dot 云时不能断言 Key 无效（CI 里网络抖动很常见）。"""
-        from unittest import mock
         from zhangyu.dot_client import DotAPIError
 
         self.write_config({"device_id": "ABCD1234ABCD"})
@@ -339,12 +392,10 @@ class ContentTargetTest(CLITestCase):
     """Text API 内容加在哪个列表，决定推送写哪里（404 的根因）。"""
 
     LOOP_EMPTY = [{"type": "GENERAL", "key": "gen1"}]
-    FIXED_WITH_TEXT = [{"type": "TEXT_API", "key": "txt-fixed-1", "taskAlias": "运势"}]
+    FIXED_WITH_TEXT = [{"type": "TEXT_API", "key": "txt-fixed-1", "taskAlias": "行情"}]
     LOOP_WITH_TEXT = [{"type": "TEXT_API", "key": "txt-loop-1"}]
 
     def _lists(self, loop, fixed):
-        from unittest import mock
-
         def fake(task_type, **kwargs):
             return list(loop) if task_type == "loop" else list(fixed)
 
@@ -352,7 +403,7 @@ class ContentTargetTest(CLITestCase):
 
     def test_uses_loop_when_text_api_present(self):
         self.write_config({"device_id": "ABCD1234ABCD"})
-        os.environ["DOT_API_KEY"] = "dot_app_" + "U" * 64
+        os.environ["DOT_API_KEY"] = GOOD_KEY
         with self._lists(self.LOOP_WITH_TEXT, []):
             code, out, _ = self.run_cli("doctor", "--check-content")
         self.assertEqual(code, 0)
@@ -361,7 +412,7 @@ class ContentTargetTest(CLITestCase):
 
     def test_reports_missing_text_api_and_app_steps(self):
         self.write_config({"device_id": "ABCD1234ABCD"})
-        os.environ["DOT_API_KEY"] = "dot_app_" + "U" * 64
+        os.environ["DOT_API_KEY"] = GOOD_KEY
         with self._lists(self.LOOP_EMPTY, []):
             code, out, err = self.run_cli("doctor", "--check-content")
         self.assertEqual(code, 0)
@@ -371,9 +422,7 @@ class ContentTargetTest(CLITestCase):
     def test_auto_switches_to_fixed_list(self):
         """循环列表没有 Text API、固定列表有 → 自动改用固定列表推送。"""
         self.write_config({"device_id": "ABCD1234ABCD"})
-        os.environ["DOT_API_KEY"] = "dot_app_" + "U" * 64
-        from unittest import mock
-
+        os.environ["DOT_API_KEY"] = GOOD_KEY
         sent = {}
 
         def fake_push(body, **kwargs):
@@ -390,9 +439,7 @@ class ContentTargetTest(CLITestCase):
 
     def test_explicit_task_type_is_respected(self):
         self.write_config({"device_id": "ABCD1234ABCD"})
-        os.environ["DOT_API_KEY"] = "dot_app_" + "U" * 64
-        from unittest import mock
-
+        os.environ["DOT_API_KEY"] = GOOD_KEY
         sent = {}
 
         def fake_push(body, **kwargs):
@@ -413,15 +460,11 @@ class KeyFormMemoryTest(CLITestCase):
         self.write_config({"device_id": "ABCD1234ABCD"})
         os.environ["DOT_API_KEY"] = "A1b2C3d4E5f6" * 5 + "G7h8"   # 68 位、无前缀
 
-        from unittest import mock
-
         def fake_push(body, **kwargs):
             kwargs["info"]["form"] = "raw"
             return "ok"
 
-        with mock.patch.object(cli, "push_text", side_effect=fake_push), \
-                mock.patch.object(cli, "resolve_content_target",
-                                 return_value=("loop", None)):
+        with mock.patch.object(cli, "push_text", side_effect=fake_push):
             code, out, _ = self.run_cli("push")
         self.assertEqual(code, 0)
         state = json.loads((self.tmp / "state.json").read_text(encoding="utf-8"))
@@ -429,11 +472,54 @@ class KeyFormMemoryTest(CLITestCase):
         self.assertEqual(cli.state_key_form(self.tmp / "state.json"), "raw")
 
     def test_env_override_wins(self):
-        self.write_config({})
         os.environ["ZHANGYU_KEY_FORM"] = "prefixed"
         path = self.tmp / "state.json"
         path.write_text(json.dumps({"key_form": "raw"}), encoding="utf-8")
         self.assertEqual(cli.state_key_form(path), "prefixed")
+
+
+class PushFlowTest(CLITestCase):
+    """成功推送：状态落盘、卡片数据源标注、点位写进 message。"""
+
+    def test_successful_push_records_state(self):
+        self.write_config({"device_id": "ABCD1234"})
+        os.environ["DOT_API_KEY"] = GOOD_KEY
+        sent = {}
+
+        def fake_push(body, **kwargs):
+            sent.update(body)
+            return "Device ABCD1234 text API content switched."
+
+        with mock.patch.object(cli, "push_text", side_effect=fake_push):
+            code, out, _ = self.run_cli("push")
+        self.assertEqual(code, 0)
+        self.assertIn("已推送 → 设备 ABCD1234", out)
+        self.assertIn("数据源：fixture(东财)", out)
+        self.assertIn("上证 3888.12 +0.56%", sent["message"])
+        self.assertIn("A股", sent["message"])
+        self.assertIn("港股", sent["message"])
+        self.assertIn("美股", sent["message"])
+        saved = json.loads((self.tmp / "state.json").read_text(encoding="utf-8"))
+        self.assertIn("last_push_at", saved)
+        self.assertEqual(saved["task_type"], "loop")
+        self.assertEqual(saved["source"], "fixture(东财)")
+
+    def test_push_404_reports_content_hint(self):
+        from zhangyu.dot_client import DotAPIError
+
+        self.write_config({"device_id": "ABCD1234"})
+        os.environ["DOT_API_KEY"] = GOOD_KEY
+        with mock.patch.object(cli, "push_text",
+                               side_effect=DotAPIError(404, "Not Found")), \
+             self._lists_empty():
+            code, _, err = self.run_cli("push")
+        self.assertEqual(code, 1)
+        self.assertIn("404", err)
+        self.assertIn("Text API", err)
+        self.assertIn("内容工坊", err)
+
+    def _lists_empty(self):
+        return mock.patch.object(cli, "get_task_list", return_value=[])
 
 
 if __name__ == "__main__":

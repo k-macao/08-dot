@@ -15,10 +15,12 @@ from zhangyu.dot_client import (
     push_text,
 )
 from zhangyu.formatter import build_card
-from zhangyu.providers import fetch_offline
-from zhangyu.signs import parse_sign
+from zhangyu.quotes import QuoteSet, load_fixture
 
 import datetime as dt
+from pathlib import Path
+
+FIXTURE_QUOTES = str(Path(__file__).parent / "fixtures" / "quotes_em.json")
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -79,8 +81,11 @@ class DotClientTest(unittest.TestCase):
         _Handler.reply = {"message": "Device ABCD1234ABCD text API content switched."}
 
     def _card(self):
-        fortune = fetch_offline(parse_sign("leo"), dt.date(2026, 10, 25))
-        return build_card(fortune)
+        quoteset = load_fixture(FIXTURE_QUOTES)
+        return build_card(
+            quoteset, moment=dt.datetime(2026, 11, 10, 15, 0,
+                                         tzinfo=dt.timezone(dt.timedelta(hours=8)))
+        )
 
     def test_normalize_api_key(self):
         self.assertEqual(normalize_api_key("abc123"), "dot_app_abc123")
@@ -123,7 +128,7 @@ class DotClientTest(unittest.TestCase):
         self.assertIn("application/json", record["content_type"])
         sent = record["body"]
         self.assertEqual(sent["taskType"], "loop")
-        self.assertIn("章鱼AI.每日占一占", sent["title"])
+        self.assertIn("章鱼AI.行情速报", sent["title"])
         self.assertIn("\n", sent["message"])  # 换行保留
 
     def test_push_404_raises(self):

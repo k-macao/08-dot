@@ -1,108 +1,110 @@
+"""zhangyu.formatter 卡片排版测试：指数行情 → 三组卡片。"""
+
 import datetime as dt
 import json
 import unittest
 from pathlib import Path
 
-from zhangyu.formatter import build_card, stars, truncate
-from zhangyu.providers import fetch_offline, parse_xxapi
-from zhangyu.signs import parse_sign
+from zhangyu.formatter import build_card, format_pct, format_price, quote_line
+from zhangyu.quotes import Quote, QuoteSet, load_fixture
 
-TODAY = dt.date(2026, 10, 25)
-
-
-def _fixture_fortune():
-    payload = json.loads(Path("tests/fixtures/xxapi_aries_today.json").read_text(encoding="utf-8"))
-    return parse_xxapi(payload, parse_sign("aries"), TODAY)
+FIXTURES = Path(__file__).parent / "fixtures"
+MOMENT = dt.datetime(2026, 11, 10, 16, 5, tzinfo=dt.timezone(dt.timedelta(hours=8)))
 
 
-class StarsTest(unittest.TestCase):
-    def test_stars(self):
-        self.assertEqual(stars(5), "★★★★★")
-        self.assertEqual(stars(3), "★★★☆☆")
-        self.assertEqual(stars(1), "★☆☆☆☆")
-        self.assertEqual(stars(0), "")
-        self.assertEqual(stars(9), "")
-        self.assertEqual(stars(None), "")
+def _em_card(**kwargs):
+    return build_card(load_fixture(str(FIXTURES / "quotes_em.json")),
+                      moment=MOMENT, **kwargs)
 
 
-class TruncateTest(unittest.TestCase):
-    def test_short_untouched(self):
-        self.assertEqual(truncate("短句。", 90), "短句。")
+class FormatHelpersTest(unittest.TestCase):
+    def test_format_price_two_decimals(self):
+        self.assertEqual(format_price(3888.12), "3888.12")
+        self.assertEqual(format_price(24567.8), "24567.80")
 
-    def test_cut_at_sentence(self):
-        text = "一二三四五六七八九十。" * 10
-        out = truncate(text, 30)
-        self.assertLessEqual(len(out), 31)
-        self.assertTrue(out.endswith("。") or out.endswith("…"))
+    def test_format_pct_signed(self):
+        self.assertEqual(format_pct(0.56), "+0.56%")
+        self.assertEqual(format_pct(-0.12), "-0.12%")
+        self.assertEqual(format_pct(0.0), "+0.00%")
+        self.assertEqual(format_pct(None), "--")
 
-    def test_hard_cut_adds_ellipsis(self):
-        out = truncate("甲" * 100, 20)
-        self.assertTrue(out.endswith("…"))
-        self.assertEqual(len(out), 21)
+    def test_quote_line_shape(self):
+        q = Quote(key="sh", group="A股", label="上证", price=3888.12, pct=0.56)
+        self.assertEqual(quote_line(q), "上证 3888.12 +0.56%")
+        q2 = Quote(key="dji", group="美股", label="道琼斯", price=47123.45, pct=-0.12)
+        self.assertEqual(quote_line(q2), "道琼斯 47123.45 -0.12%")
 
 
 class BuildCardTest(unittest.TestCase):
-    def test_brief_card_from_real_fixture(self):
-        fortune = _fixture_fortune()
-        card = build_card(fortune, title="章鱼AI.每日占一占", style="brief", max_chars=90)
+    def test_card_contains_three_groups_in_order(self):
+        message = _em_card()["message"]
+        lines = message.splitlines()
+        headers = [ln for ln in lines if ln in ("A股", "港股", "美股")]
+        self.assertEqual(headers, ["A股", "港股", "美股"])
+        # 组内保持 INDEX_SPECS 顺序
+        a_share = lines[lines.index("A股") + 1: lines.index("港股")]
+        self.assertTrue(a_share[0].startswith("上证 "))
+        self.assertTrue(a_share[1].startswith("深成 "))
+        self.assertTrue(a_share[2].startswith("创业板 "))
+        self.assertTrue(a_share[3].startswith("沪深300 "))
 
-        self.assertEqual(card["title"], "章鱼AI.每日占一占")
-        message = card["message"]
+    def test_card_has_all_10_indices(self):
+        lines = _em_card()["message"].splitlines()
+        index_lines = [ln for ln in lines if ln not in ("A股", "港股", "美股")]
+        self.assertEqual(len(index_lines), 10)
+        # 关键数值抽查
+        self.assertIn("上证 3888.12 +0.56%", index_lines)
+        self.assertIn("恒生科技 5678.90 -0.66%", index_lines)
+        self.assertIn("标普500 5890.12 +0.18%", index_lines)
 
-        # 头部
-        self.assertTrue(message.startswith("♈ 白羊座 · 今日运势"))
-        # 简评 + 星级 + 指数
-        self.assertIn("「积累自身实力」★★★★☆ 73%", message)
-        # 正文（截断且无水印）
-        self.assertNotIn("星o座o屋", message)
-        # 四维指数
-        self.assertIn("爱情 56% · 事业 84% · 财运 14% · 健康 34%", message)
-        # 宜忌与幸运信息
-        self.assertIn("宜 整理闲置物品 · 忌 沉迷刷短视频", message)
-        self.assertIn("幸运 草绿 · 17 · 贵人 狮子座", message)
-        # 签名
-        self.assertEqual(card["signature"], "2026年10月25日 星期日 · 章鱼AI")
-        # brief 不包含分项长文
-        self.assertNotIn("整体节奏紧凑且效率较高", message)
+    def test_title_and_signature(self):
+        card = _em_card()
+        self.assertEqual(card["title"], "章鱼AI.行情速报")
+        self.assertEqual(card["signature"],
+                         "2026年11月10日 星期二 16:05 · 章鱼AI")
 
-    def test_full_card_contains_domains(self):
-        fortune = _fixture_fortune()
-        card = build_card(fortune, style="full", max_chars=90)
-        self.assertIn("事业 ", card["message"])
-        self.assertIn("财运 ", card["message"])
-
-    def test_offline_card_shape(self):
-        fortune = fetch_offline(parse_sign("leo"), TODAY)
-        card = build_card(fortune, title="章鱼AI.每日占一占")
-        lines = card["message"].splitlines()
-        self.assertTrue(lines[0].startswith("♌ 狮子座 · 今日运势"))
-        self.assertTrue(any(line.startswith("宜 ") for line in lines))
-        self.assertTrue(any(line.startswith("幸运 ") for line in lines))
-        self.assertIn("综合" in card["message"] or "★" in card["message"], (True, False))
-
-    def test_no_title_card(self):
-        """title 为空串时卡片不带标题，Text API 侧可据此不发 title 字段。"""
-        fortune = _fixture_fortune()
-        card = build_card(fortune, title="", style="brief", max_chars=90)
+    def test_title_can_be_empty(self):
+        card = _em_card(title="")
         self.assertEqual(card["title"], "")
-        self.assertEqual(card["signature"], "2026年10月25日 星期日 · 章鱼AI")
-        # 正文内容与带标题时一致
-        self.assertTrue(card["message"].startswith("♈ 白羊座 · 今日运势"))
 
-    def test_minimal_english_card(self):
-        from zhangyu.providers import Fortune
+    def test_custom_brand(self):
+        card = _em_card(brand="测试品牌")
+        self.assertTrue(card["signature"].endswith("· 测试品牌"))
 
-        fortune = Fortune(
-            sign=parse_sign("leo"),
-            date=TODAY,
-            source="test",
-            overall="A quiet and thoughtful day.",
-        )
-        card = build_card(fortune)
+    def test_missing_group_skipped(self):
+        quotes = [Quote(key="sh", group="A股", label="上证", price=3000.0, pct=1.0)]
+        card = build_card(QuoteSet(quotes=quotes, source="t"), moment=MOMENT)
+        self.assertEqual(card["message"], "A股\n上证 3000.00 +1.00%")
+
+    def test_empty_quoteset_gets_placeholder(self):
+        card = build_card(QuoteSet(quotes=[], source="t"), moment=MOMENT)
+        self.assertEqual(card["message"], "暂无行情数据")
+
+    def test_partial_quotes_only_lists_available(self):
+        # 卡片只显示实际取到的行，不虚构缺失项
+        qs = load_fixture(str(FIXTURES / "quotes_em.json"))
+        qs.quotes = [q for q in qs.quotes if q.group == "美股"]
+        card = build_card(qs, moment=MOMENT)
         lines = card["message"].splitlines()
-        self.assertEqual(lines[0], "♌ 狮子座 · 今日运势")
-        self.assertEqual(lines[1], "A quiet and thoughtful day.")
-        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0], "美股")
+        self.assertEqual(len(lines), 4)
+        self.assertNotIn("A股", lines)
+
+
+class CardSizeTest(unittest.TestCase):
+    """估算屏幕预算：152×296，正文行宽有限，长行依赖设备换行。"""
+
+    def test_line_count_within_budget(self):
+        card = _em_card()
+        total = 1 + len(card["message"].splitlines()) + 1  # 标题 + 正文 + 签名
+        self.assertLessEqual(total, 16)
+
+    def test_signature_includes_build_time_not_data_time(self):
+        # 数据时间与排版时间分开：签名取本地当前时间
+        earlier = MOMENT - dt.timedelta(hours=3)
+        qs = load_fixture(str(FIXTURES / "quotes_em.json"))
+        card = build_card(qs, moment=earlier)
+        self.assertIn("13:05", card["signature"])
 
 
 if __name__ == "__main__":

@@ -1,15 +1,15 @@
-# 章鱼AI.每日占一占
+# 章鱼AI.行情速报
 
-> 每日占星运程 → Dot 硬件设备（Quote/0 等）墨水屏卡片，卡片标题：**章鱼AI.每日占一占**
+> A股/港股/美股指数行情 → Dot 硬件设备（Quote/0 等）墨水屏卡片，卡片标题：**章鱼AI.行情速报**
 >
-> **星座固定为狮子座（leo）**：云端推送与独立固件均不再每日抽签；旧的随机/其他星座设置会被忽略，固件升级保留 WiFi 配置。
+> 交易时段**逐小时**推送最新点位：卡上只有三组指数 —— **A股**（上证/深成/创业板/沪深300）、**港股**（恒指/恒生国企/恒生科技）、**美股**（道琼斯/纳斯达克/标普500），共 10 项，不带其它内容。
 >
 > 两条实现路线（可并存）：
 >
 > | 路线 | 说明 | 入口 |
 > | --- | --- | --- |
-> | **① 纯固件 BIN（刷机）** | ESP-IDF 独立固件：设备自己联网取运势、16px 中文字库本地渲染、每天 07:00 自动更新，不依赖 Dot 云 | [`firmware/`](firmware/README.md) + CI 产物 `zhangyu-daily-bin` |
-> | **② 云端 Text API（免刷机）** | 按 dot_open_platform 开放接口每日把卡片推到设备 | 本文下方流水线 + GitHub Actions `daily-push` |
+> | **① 纯固件 BIN（刷机）** | ESP-IDF 独立固件：设备自己联网取**每日占星运势**、16px 中文字库本地渲染、每天 07:00 自动更新，不依赖 Dot 云（保持原样） | [`firmware/`](firmware/README.md) + CI 产物 `zhangyu-daily-bin` |
+> | **② 云端 Text API（免刷机）** | 交易时段每小时取指数行情推到设备（**本文**） | 下方流水线 + GitHub Actions `daily-push` |
 
 > 固件路线可以在**不接硬件**的情况下自检排版：
 > `python3 firmware/tools/preview_card.py` 会把卡片渲染成 PNG，
@@ -17,12 +17,12 @@
 > 已修的显示问题清单见 [firmware/README.md](firmware/README.md#排版显示问题回归清单)。
 
 ```text
-[线上占星接口]  ──►  zhangyu 排版/降级/幂等  ──►  Dot 云 Text API  ──►  设备墨水屏
- v2.xxapi.cn ─┐          run_daily.py          /api/authV2/open/        Quote/0 152×296
- freehoroscope ─┤                                  device/:id/text
- 内置离线引擎 ──┘
-       ▲
-  每日定时：GitHub Actions (UTC 23:00 = 京/澳 07:00)  或  本地 crontab
+[东方财富 push2]  ─┐
+[新浪财经 hq.sinajs] ─┼─►  zhangyu 排版/幂等/交易时段门控  ──►  Dot 云 Text API  ──►  设备墨水屏
+[本地缓存 data/]  ──┘          run_daily.py push                /api/authV2/open/        Quote/0 152×296
+                                    ▲                          device/:id/text
+                     GitHub Actions cron：工作日交易时段逐小时
+                     （UTC 01:30–08:30 = 京/澳 09:30–16:30；UTC 13:30–21:30 = 美股盘中）
 ```
 
 ## 一、对 dot_open_platform 的理解（任务 1）
@@ -55,52 +55,62 @@
 
 > 本项目即基于 Text API v2 端点（旧端点 `/api/open/text` 已弃用但仍转发）。
 
-## 二、每日占星运程数据源（任务 2）
+## 二、指数行情数据源（任务 2）
 
 调研对比后选定（均免密钥）：
 
 | 优先级 | 数据源 | 语言 | 说明 |
 | --- | --- | --- | --- |
-| 1（主用） | `https://v2.xxapi.cn/api/horoscope?type={sign}&time=today` | 中文 | 免费免密、QPS 50；返回综合/爱情/事业/财运/健康 **文本+指数+星级**、宜忌、幸运色/数字/贵人星座，内容最契合卡片 |
-| 2（备用） | `https://freehoroscopeapi.com/api/v1/get-horoscope/daily?sign={sign}` | 英文 | 免费免密，仅综合运势文本 |
-| 3（兜底） | `zhangyu.providers.fetch_offline` | 中文 | 内置“章鱼AI 离线占卜引擎”：按 (日期, 星座) 种子确定性生成，**任何网络故障都能出卡** |
+| 1（主用） | 东方财富 `push2.eastmoney.com/api/qt/ulist.np/get` | JSON | 一次批量取回全部 10 项（`secids` 拼接，`fltt=2`）；`push2` / `82.push2` / `72.push2` 三个镜像依次降级 |
+| 2（备用） | 新浪 `hq.sinajs.cn/list=…` | GBK 文本 | 独立解析（A股/港股/美股三种字段布局）；需带 `Referer: https://finance.sina.com.cn/` |
+| 3（兜底） | `data/quotes_cache.json` | JSON | 上一次成功取数的本地缓存，展示时标注 `缓存(MM-DD HH:MM)`，**不编数据** |
 
-`providers` 顺序可在配置中调整；任何一源失败自动降级到下一源（日志输出到 stderr）。
+要点：
 
-## 三、每日推送流水线（任务 3）
+- **东财 secid 实测口径**（参考本系列仓库 k-macao/001 的踩坑记录）：恒生科技 = `124.HSTECH`（`100.HSTECH` 已死，混入批量会让整批返回 `data:null`）；`100.NDX` 返回的是纳斯达克**综合**指数（与 ^IXIC 同值）；
+- 东财批量失败（含单个失效 secid 拖垮整批）自动换新浪；两边都取到部分指数时合并显示（宁可少几项也不整卡缺失）；
+- 指数清单与代码对照随时可查：`python3 run_daily.py indices`。
+
+## 三、每小时推送流水线（任务 3）
 
 一次 `python3 run_daily.py push` 完成：
 
-1. **定时触发**（见下文“每日定时”）或手动执行；
-2. 固定取**狮子座**运势（旧配置、`ZHANGYU_SIGN` 和随机抽签不能覆盖；`--sign` 仅兼容 `leo` / 狮子座 / 獅子座 / ♌）；
-3. 按数据源优先级取**今日运势**；
-4. 排版为 Text API 卡片（`title` / `message` / `signature`）；
-5. 幂等检查（`data/state.json` 记录当天已推送狮子座则跳过，旧的其他星座记录不阻塞迁移，`--force` 强制重推）；
-6. `POST …/device/{id}/text`（带重试），成功后写状态文件并打印卡片。
+1. **定时触发**（见下文「交易时段定时」）或手动执行；
+2. `--trading-only`（定时任务专用）：先判交易时段 —— 京/澳工作日 09:30–17:30 为 A股/港股盘中，美东工作日 09:30–17:30 为美股盘中（含夏令时）；休市直接跳过（退出码 0）；
+3. 按数据源优先级取**最新 10 项指数点位**；
+4. 排版为 Text API 卡片（`title` / `message` / `signature`，签名取推送时刻）；
+5. 幂等检查：`data/state.json` 记录 `last_push_at`，**50 分钟内**已推送则跳过（对应整点节奏，`--force` 穿透；旧的按日格式记录不拦）；
+6. `POST …/device/{id}/text`（带重试与 Key 换形），成功后写状态文件并打印卡片。
 
-### 卡片效果（狮子座预览）
+### 卡片效果
 
-运行 `python3 run_daily.py preview --provider offline` 可在本地查看狮子座卡片，
-例如（离线引擎示意，线上数据每天更新）：
+运行 `python3 run_daily.py preview --fixture tests/fixtures/quotes_em.json` 可离线查看卡片（测试夹具数据）：
 
 ```text
 ==============================================
-标题：章鱼AI.每日占一占
+标题：章鱼AI.行情速报
 ----------------------------------------------
-♌ 狮子座 · 今日运势
-「轻装上阵」★★★★★ 97%
-旧事重提不是为了翻篇，而是为了轻装；把结论写下来，心就定了。
-爱情 97% · 事业 85% · 财运 66% · 健康 56%
-宜 记录今天的小确幸 · 忌 替人做承诺
-幸运 墨黑 · 2 · 贵人 双子座
+A股
+上证 3888.12 +0.56%
+深成 13456.78 -0.31%
+创业板 3123.45 +1.02%
+沪深300 4567.89 +0.44%
+港股
+恒指 24567.89 +0.31%
+恒生国企 8765.43 +0.28%
+恒生科技 5678.90 -0.66%
+美股
+道琼斯 47123.45 -0.12%
+纳斯达克 19876.54 +0.25%
+标普500 5890.12 +0.18%
 ----------------------------------------------
-签名：2026年10月29日 星期四 · 章鱼AI
+签名：2026年11月10日 星期二 16:05 · 章鱼AI
+数据源：东方财富（10 项）
 ==============================================
 ```
 
-> 固定的只是**运势所属星座**；数据源提供的「贵人星座」仍可能不同。
-
-`--style full` 还会追加爱情/事业/财运/健康四段详细文本。
+> 三组小节 + 每项一行（`短名 点位 涨跌幅`），点位保留 2 位小数、涨跌幅始终带符号；
+> 实际点位随行内换行显示，设备可自动折行。未取到的指数只从卡上缺席，不写假数据。
 
 ## 快速开始
 
@@ -119,15 +129,15 @@
 
 ```bash
 cp config.example.json config.json    # 已在 .gitignore 中，不会提交
-# 编辑 config.json：device_id、style 等（星座固定为狮子座）
+# 编辑 config.json：device_id 等
 export DOT_API_KEY='dot_app_xxxxxxxxx'   # API Key 只走环境变量
 ```
 
 ### 3. 验证
 
 ```bash
-python3 run_daily.py doctor                 # 环境自检
-python3 run_daily.py preview                # 预览狮子座排版（不推送）
+python3 run_daily.py doctor                 # 环境自检（含行情源与交易时段）
+python3 run_daily.py preview                # 预览行情卡片（不推送）
 python3 run_daily.py push --dry-run         # 走完整流水线但不调用 Dot 云
 python3 run_daily.py push                   # ✅ 真实推送到设备
 ```
@@ -135,24 +145,34 @@ python3 run_daily.py push                   # ✅ 真实推送到设备
 常用参数：
 
 ```bash
-python3 run_daily.py push --sign leo        # 兼容写法，仍固定狮子座
-python3 run_daily.py push --style full      # 完整四段式
-python3 run_daily.py push --force           # 忽略当天幂等，强制重推
-python3 run_daily.py push --no-title        # 卡片不带标题（配合 config title: "" 也可）
+python3 run_daily.py push --trading-only    # 休市时跳过（定时任务用）
+python3 run_daily.py push --force           # 忽略 50 分钟幂等，强制重推
+python3 run_daily.py push --source sina     # 只用新浪源（默认 auto=东财→新浪→缓存）
+python3 run_daily.py push --source em       # 只用东财源
+python3 run_daily.py push --no-title        # 卡片不带标题（config title:"" 同效）
 python3 run_daily.py push --show-payload    # 打印请求体（凭据缺失时也会打印）
 python3 run_daily.py push --dry-run --show-payload   # 只看排版+请求体，无需任何凭据
-python3 run_daily.py push --provider xxapi  # 只用某个数据源
-python3 run_daily.py preview --sign 狮子座 --no-title   # 无标题预览（不推送）
+python3 run_daily.py preview --fixture tests/fixtures/quotes_em.json  # 离线夹具预览
+python3 run_daily.py indices                # 查看 10 项指数清单（分组/secid/新浪代码）
 python3 run_daily.py doctor --check-key     # 真调只读接口验证 API Key 是否有效
-python3 run_daily.py signs                  # 查看固定星座（狮子座）
 ```
 
-## 每日定时（任务 3 的“每日”）
+## 交易时段定时（任务 3 的“每小时”）
 
 ### 方式 A：GitHub Actions（推荐，仓库已在 GitHub 上）
 
 工作流：[.github/workflows/daily-push.yml](.github/workflows/daily-push.yml)
-每天 **UTC 23:00（北京/澳门次日 07:00）** 自动运行“单测 → 推送”，并支持手动触发（星座固定为狮子座）。
+
+cron：`30 1-8,13-21 * * 1-5`（**工作日**、每小时第 30 分钟）：
+
+| 窗口（UTC） | 本地时间 | 覆盖 |
+| --- | --- | --- |
+| 01:30–08:30 | 京/澳 09:30–16:30 | A股/港股盘中逐小时 |
+| 13:30–21:30 | 美东 09:30–17:30（夏）/ 08:30–16:30（冬） | 美股盘中逐小时 |
+
+定时触发带 `--trading-only`：**休市（盘前/收盘/周末/节假日）的触发由脚本判为非交易时段并直接跳过（exit 0，run 保持绿色）**；夏令时切换、cron 自身延迟都由脚本的时段判断兜底，宁可宽一点。
+
+手动 **Run workflow** 不加门控 —— 随时可以推送/预览，方便验证。
 
 一次性配置（仓库 **Settings → Secrets and variables → Actions**）：
 
@@ -160,14 +180,15 @@ python3 run_daily.py signs                  # 查看固定星座（狮子座）
 | --- | --- | --- |
 | `DOT_API_KEY` | **Secret**（只放 Secret） | Dot. App 导出的 API Key，形如 `dot_app_xxx` |
 | `DOT_DEVICE_ID` | Secret **或** Variable | 设备序列号（工作流两处都会读，放错页面也能跑） |
-| `ZHANGYU_SIGN` | 不再使用 | 旧变量会被忽略，无需删除；显示星座固定为 `leo` |
+| `ZHANGYU_TITLE` | 可选 Variable/环境 | 覆盖卡片标题 |
+| `ZHANGYU_SOURCE` | 可选 | `em` / `sina` / `auto`，覆盖数据源 |
 
 > 工作流第一步是 **Preflight（凭据自检）**：凭据缺失会立刻以
 > `::error::` 注释 + Job Summary 给出配置位置，而不是等到推送时才报一句
 > 「未配置设备序列号」。手动触发时勾选 **dry_run** 可以只预览卡片与请求体
 > （不需要任何凭据）。
 
-**排障：`错误：未配置设备序列号` / `Error: Process completed with exit code 2`**
+**排障：`错误：未配置 device_id` / `Error: Process completed with exit code 2`**
 
 1. `Settings → Secrets and variables → Actions` 里新建 `DOT_DEVICE_ID`
    （Secret 或 Variable 均可），值 = 设备序列号；`DOT_API_KEY` 必须是 Secret；
@@ -206,7 +227,7 @@ Dot. App → 内容工坊 / Content Studio → 选择这台设备
         → 把「Text API」内容加入【循环列表】→ 保存
 ```
 
-加一次即可，之后每天自动推送。手动排查：
+加一次即可，之后每次自动推送。手动排查：
 
 ```bash
 python3 run_daily.py doctor --check-content
@@ -241,28 +262,30 @@ python3 run_daily.py doctor --check-content
 ### 方式 B：本地 crontab
 
 ```cron
-# 每天 07:00（机器时区为 UTC+8 时）推送
-0 7 * * * cd /path/to/08-dot && DOT_API_KEY='dot_app_xxx' /usr/bin/python3 run_daily.py push >> logs/push.log 2>&1
+# 京/澳工作日 09:30–16:30 每半小时触发一次，由 --trading-only 决定发不发
+30 9-16 * * 1-5 cd /path/to/08-dot && DOT_API_KEY='dot_app_xxx' /usr/bin/python3 run_daily.py push --trading-only >> logs/push.log 2>&1
 ```
 
 > macOS/Linux 通用；确保 cron 环境能访问外网，并提前 `mkdir -p logs`。
+> 美股时段（美东盘中 = 京/澳 21:30–05:30）如需覆盖，再加一行对应小时即可，
+> `--trading-only` 会按美东时间自行判断。
 
 ## 配置项（config.json）
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `device_id` | `""` | 设备序列号；环境变量 `DOT_DEVICE_ID` 优先 |
-| `title` | `章鱼AI.每日占一占` | 卡片标题；设为 `""`（或 CLI 传 `--no-title`）时卡片不带标题，Text API 也不发 `title` 字段 |
-| `sign_mode` | `fixed` | 兼容保留；运行时固定为 `fixed`，旧 `random` 设置不生效 |
-| `sign` | `leo` | 兼容保留；运行时固定为狮子座，其他值不生效 |
-| `style` | `brief` | `brief` 精简 / `full` 含四段详细文本 |
-| `max_chars` | `90` | 综合运势截断长度（尽量断在句读处） |
+| `title` | `章鱼AI.行情速报` | 卡片标题；设为 `""`（或 CLI 传 `--no-title`）时卡片不带标题，Text API 也不发 `title` 字段 |
+| `brand` | `章鱼AI` | 签名栏署名 |
+| `source` | `auto` | `auto`（东财→新浪→缓存）/ `em` / `sina`；环境变量 `ZHANGYU_SOURCE` 与 CLI `--source` 覆盖 |
+| `fixture` | `null` | 离线夹具路径（东财原始响应或归一化 JSON），设置后不联网 |
 | `task_type` | `loop` | `loop` 循环列表 / `fixed` 固定列表 |
 | `task_key` | `null` | fixed 列表项 key（配合 `--task-key`） |
 | `task_alias` | 同标题 | 设备任务列表中的显示名 |
 | `refresh_now` | `true` | 在线设备立即刷新循环内容 |
-| `providers` | `["xxapi","freehoroscope","offline"]` | 数据源优先级 |
-| `timezone` | `Asia/Macau` | 卡片日期/签名所用时区 |
+| `timezone` | `Asia/Macau` | 卡片签名所用时区 |
+| `state_file` | `data/state.json` | 幂等状态（`last_push_at`、`key_form` 等） |
+| `cache_file` | `data/quotes_cache.json` | 行情缓存（两边数据源全挂时兜底） |
 | `icon_url` / `nfc_link` | `null` | 可选：40×40 图标 URL / NFC 跳转链接 |
 
 ## 测试
@@ -271,7 +294,7 @@ python3 run_daily.py doctor --check-content
 python3 -m unittest discover -s tests -v
 ```
 
-单测覆盖：固定狮子座策略与旧 NVS 迁移、星座解析、真实响应 fixture 解析与水印清理、排版/截断/星级、离线引擎确定性、Dot 客户端请求形态（本地 mock HTTP 服务，校验路径/鉴权/请求体）与错误码处理，CLI 契约（凭据缺失时的行为、`--show-payload` / `--dry-run` 语义、占位 device_id、幂等跳过），API Key 清洗（引号/空白/`Bearer ` 前缀）、Key 形态软校验（72 字符 / 前缀 / 异种 token）与补前缀失败自动换形重试，Key 形态记忆、列表查询与内容槽位自动选择（loop/fixed），以及无效 Key 的排查提示。
+单测覆盖：指数清单与东财/新浪解析（含部分响应、坏响应、空行情行跳过）、降级链与缓存兜底、交易时段门控（京/澳与美东盘中、午界、周末、夏令时）、三组卡片排版与签名、CLI 契约（凭据缺失、`--show-payload` / `--dry-run` 语义、占位 device_id、50 分钟幂等与 `--force`、`--trading-only` 门控、`--no-title`），Dot 客户端请求形态（本地 mock HTTP 服务，校验路径/鉴权/请求体）与错误码处理，API Key 清洗（引号/空白/`Bearer ` 前缀）、Key 形态软校验与补前缀失败自动换形重试、Key 形态记忆、列表查询与内容槽位自动选择（loop/fixed），以及无效 Key 的排查提示；固件 NVS 配置测试照旧。全部测试离线可跑（行情夹具 + mock 云）。
 
 ## 常见问题
 
@@ -282,9 +305,11 @@ python3 -m unittest discover -s tests -v
 | `403` | 该 API Key 无权操作此设备（换绑/重建 Key） |
 | `500` | 设备侧切换失败（设备离线/未响应），脚本会自动重试 3 次 |
 | 推了但屏幕没变 | 循环内容需设备在线且 `refreshNow:true`；**固定列表**项只在 App 设定的刷新点更新 |
-| 当天想重推 | `python3 run_daily.py push --force` |
-| 接口全挂了 | 自动落到内置离线占卜引擎，卡片照常送达（数据源字段会标注“经降级”） |
-| CI 报 `未配置设备序列号`（exit 2） | 仓库没配 `DOT_DEVICE_ID`（Secret 或 Variable 均可）；见上文「排障」 |
+| 50 分钟内想再推 | `python3 run_daily.py push --force` |
+| 定时跑显示「非交易时段…跳过」 | 正常：休市门控放行（run 为绿色）；盘中仍被跳过则多半是节假日休市 |
+| `行情获取失败` | 东财/新浪都挂且本地无缓存；重跑一次（脚本会自动降级）。缓存兜底时卡上标注 `缓存(MM-DD HH:MM)` |
+| 某项指数缺席卡片 | 该指数没取到（如单个 secid 失效被过滤）；只显示真实数据，不编造 |
+| CI 报 `未配置 device_id`（exit 2） | 仓库没配 `DOT_DEVICE_ID`（Secret 或 Variable 均可）；见上文「排障」 |
 | `config.json` 里还是模板值 | `YOUR_DEVICE_SERIAL_NUMBER` 会被当成“未配置”，不会再打到 Dot 云换一个 404 |
 | 想看请求体但没凭据 | `push --show-payload` 现在会先打印请求体再报错；`--dry-run --show-payload` 直接成功退出 |
 | 密钥安全 | API Key 只放环境变量/CI Secret；`config.json`、`data/` 已被 `.gitignore` 排除 |
@@ -297,13 +322,12 @@ python3 -m unittest discover -s tests -v
 ├── config.example.json            # 配置模板（复制为 config.json）
 ├── run_daily.py                   # 入口：python3 run_daily.py <cmd>
 ├── zhangyu/
-│   ├── signs.py                   # 星座元数据与解析（显示固定狮子座）
-│   ├── providers.py               # 数据源：xxapi → freehoroscope → 离线兜底
-│   ├── formatter.py               # Text API 卡片排版（title/message/signature）
+│   ├── quotes.py                  # 行情数据源：东财 → 新浪 → 缓存 + 交易时段门控
+│   ├── formatter.py               # Text API 卡片排版（三组指数 title/message/signature）
 │   ├── dot_client.py              # Dot Text API 客户端（认证/重试/错误码）
-│   └── cli.py                     # push / preview / signs / doctor
-├── .github/workflows/daily-push.yml  # 每日定时推送（UTC 23:00 = 07:00 京/澳）
-├── tests/                         # 单测 + 真实接口 fixture
+│   └── cli.py                     # push / preview / indices / doctor
+├── .github/workflows/daily-push.yml  # 交易时段逐小时推送（cron 30 1-8,13-21 * * 1-5）
+├── tests/                         # 单测 + 行情/接口 fixture（全部离线）
 ├── requirements.txt               # 零依赖说明
 └── .gitignore                     # 排除 config.json / data/ / logs/
 ```
@@ -313,9 +337,7 @@ python3 -m unittest discover -s tests -v
 - Dot Open Platform 仓库：<https://github.com/MindReset/dot_open_platform>
 - 开发者平台文档：<https://dot.mindreset.tech/docs/service/open>
 - Text API：<https://dot.mindreset.tech/docs/service/open/text_api>
-- 主数据源：<https://xxapi.cn/doc/horoscope>
-- 备数据源：<https://freehoroscopeapi.com/>
 
 ## License
 
-MIT（跟随本仓库）。占星内容仅供娱乐参考。
+MIT（跟随本仓库）。行情数据仅供参考，不构成投资建议。
