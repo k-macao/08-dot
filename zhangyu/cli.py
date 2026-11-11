@@ -40,7 +40,7 @@ from .dot_client import (
     push_text,
     text_tasks,
 )
-from .formatter import build_card
+from .formatter import CARD_ROWS, build_card
 from .quotes import (
     INDEX_SPECS,
     QuoteError,
@@ -134,8 +134,9 @@ def _print_card(card: Dict[str, Any], quoteset: QuoteSet) -> None:
     print("-" * 46)
     print(card["message"])
     print("-" * 46)
-    print(f"签名：{card['signature']}")
-    print(f"数据源：{quoteset.source}（{len(quoteset.quotes)} 项）")
+    if card.get("signature"):
+        print(f"签名：{card['signature']}")
+    print(f"数据源：{quoteset.source}（取数 {len(quoteset.quotes)} 项）")
     print("=" * 46)
 
 
@@ -360,7 +361,6 @@ def cmd_push(args) -> int:
     card = build_card(
         quoteset,
         title=title,
-        brand=cfg.get("brand") or "章鱼AI",
         moment=now,
     )
 
@@ -507,7 +507,6 @@ def cmd_preview(args) -> int:
     card = build_card(
         quoteset,
         title=title,
-        brand=cfg.get("brand") or "章鱼AI",
         moment=now,
     )
     _print_card(card, quoteset)
@@ -521,7 +520,8 @@ def cmd_indices(_args) -> int:
     print("-" * 56)
     for spec in INDEX_SPECS:
         print(f"{spec.key:<8}{spec.group:<6}{spec.label:<10}{spec.em:<14}{spec.sina}")
-    print(f"\n共 {len(INDEX_SPECS)} 项，分 A股 / 港股 / 美股 三组显示在卡片上。")
+    print(f"\n共 {len(INDEX_SPECS)} 项批量取数；卡片按顺序只显示其中 {len(CARD_ROWS)} 项：")
+    print("  " + " → ".join(label for _, label in CARD_ROWS))
     return 0
 
 
@@ -614,11 +614,10 @@ def cmd_doctor(args) -> int:
     print(f"- source: {cfg['source']}  task_type: {cfg['task_type']}")
     try:
         quoteset = load_quotes(cfg, args)
-        card = build_card(quoteset, title=cfg["title"],
-                          brand=cfg.get("brand") or "章鱼AI", moment=now)
+        card = build_card(quoteset, title=cfg["title"], moment=now)
         lines = card["message"].count("\n") + 1
-        print(f"- 行情源: {quoteset.source} ✅（{len(quoteset.quotes)} 项）")
-        print(f"- 卡片排版: ✅（message {lines} 行）")
+        print(f"- 行情源: {quoteset.source} ✅（取数 {len(quoteset.quotes)} 项）")
+        print(f"- 卡片排版: ✅（6 行 = 标题·日期时间 + {lines} 行指数）")
     except Exception as exc:  # 自检不因异常中断
         print(f"- 行情源/排版: ❌ {exc}")
     return 0
@@ -666,7 +665,7 @@ def main(argv=None) -> int:
     )
     p_preview.add_argument("--json", action="store_true", help="额外输出 JSON 形式的卡片")
 
-    p_indices = sub.add_parser("indices", help="查看卡片上的指数清单（10 项 / 三组）")
+    p_indices = sub.add_parser("indices", help="查看指数清单（取数 10 项 / 卡片显示 5 项）")
     p_indices.add_argument("--config", help=argparse.SUPPRESS)  # 与其它子命令保持一致
 
     p_doctor = sub.add_parser("doctor", help="环境自检")

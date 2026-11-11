@@ -4,5 +4,5 @@ Pipeline:
     指数行情源 (东方财富 → 新浪 → 本地缓存)  ->  文本卡片排版  ->  Dot 云 Text API  ->  设备屏幕
 """
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 APP_NAME = "章鱼AI.行情速报"

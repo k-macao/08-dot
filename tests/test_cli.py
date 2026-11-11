@@ -87,7 +87,7 @@ class DefaultsTest(CLITestCase):
     def test_version_and_app_name(self):
         from zhangyu import APP_NAME, __version__
         self.assertEqual(APP_NAME, "章鱼AI.行情速报")
-        self.assertEqual(__version__, "2.0.0")
+        self.assertEqual(__version__, "2.1.0")
 
     def test_indices_command_lists_all(self):
         code, out, _ = self.run_cli("indices")
@@ -100,16 +100,23 @@ class DefaultsTest(CLITestCase):
 
 
 class PreviewTest(CLITestCase):
-    def test_preview_shows_three_groups_and_quotes(self):
+    def test_preview_shows_six_line_card(self):
         code, out, _ = self.run_cli("preview")
         self.assertEqual(code, 0)
-        for header in ("A股", "港股", "美股"):
-            self.assertIn(header, out)
-        self.assertIn("上证 3888.12 +0.56%", out)
-        self.assertIn("恒生科技 5678.90 -0.66%", out)
-        self.assertIn("标普500 5890.12 +0.18%", out)
+        # 第 1 行：标题 · 日期时间
+        self.assertRegex(out, r"标题：章鱼AI\.行情速报 · \d{2}-\d{2} \d{2}:\d{2}")
+        # 第 2–6 行：五项指数，指定显示名
+        for line in ("上证 3888.12 +0.56%", "恒生指数 24567.89 +0.31%",
+                     "恒科 5678.90 -0.66%", "纳斯达克 19876.54 +0.25%",
+                     "标普五百 5890.12 +0.18%"):
+            self.assertIn(line, out)
+        # 只显示这 5 项：分组标题与其余指数都不出现
+        for absent in ("A股", "港股", "美股", "深成", "创业板",
+                       "沪深300", "恒生国企", "道琼斯"):
+            self.assertNotIn(absent, out)
+        self.assertNotIn("签名：", out)   # 6 行卡片无独立签名行
         self.assertIn("数据源：fixture(东财)", out)
-        self.assertIn("10 项", out)
+        self.assertIn("取数 10 项", out)  # 数据层仍批量取 10 项
 
     def test_preview_title_from_config(self):
         self.write_config({"title": "自定义标题"})
@@ -495,10 +502,20 @@ class PushFlowTest(CLITestCase):
         self.assertEqual(code, 0)
         self.assertIn("已推送 → 设备 ABCD1234", out)
         self.assertIn("数据源：fixture(东财)", out)
-        self.assertIn("上证 3888.12 +0.56%", sent["message"])
-        self.assertIn("A股", sent["message"])
-        self.assertIn("港股", sent["message"])
-        self.assertIn("美股", sent["message"])
+        # 第 1 行在 title 字段：标题 · 日期时间
+        self.assertTrue(sent["title"].startswith("章鱼AI.行情速报 · "))
+        # 第 2–6 行：五项指数按指定顺序与显示名
+        self.assertEqual(
+            sent["message"].splitlines(),
+            [
+                "上证 3888.12 +0.56%",
+                "恒生指数 24567.89 +0.31%",
+                "恒科 5678.90 -0.66%",
+                "纳斯达克 19876.54 +0.25%",
+                "标普五百 5890.12 +0.18%",
+            ],
+        )
+        self.assertNotIn("signature", sent)  # 无独立签名行
         saved = json.loads((self.tmp / "state.json").read_text(encoding="utf-8"))
         self.assertIn("last_push_at", saved)
         self.assertEqual(saved["task_type"], "loop")
