@@ -1,18 +1,15 @@
 {
   "device_id": "YOUR_DEVICE_SERIAL_NUMBER",
-  "title": "章鱼AI.每日占一占",
+  "title": "章鱼AI.行情速报",
   "brand": "章鱼AI",
-  "sign_mode": "fixed",
-  "sign": "leo",
-  "style": "brief",
-  "max_chars": 90,
+  "source": "auto",
   "task_type": "loop",
   "task_key": null,
-  "task_alias": "章鱼AI.每日占一占",
+  "task_alias": "章鱼AI.行情速报",
   "refresh_now": true,
-  "providers": ["xxapi", "freehoroscope", "offline"],
   "icon_url": null,
   "nfc_link": null,
   "timezone": "Asia/Macau",
-  "state_file": "data/state.json"
+  "state_file": "data/state.json",
+  "cache_file": "data/quotes_cache.json"
 }

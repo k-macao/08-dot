@@ -1,9 +1,13 @@
-name: 每日占星推送 (章鱼AI.每日占一占)
+name: 行情速报推送 (章鱼AI.行情速报)
 
 on:
   schedule:
-    # 每天 UTC 23:00 = 北京/澳门时间 次日 07:00
-    - cron: "0 23 * * *"
+    # 交易时段逐小时推送（工作日；分钟 30 = 各半点行情）：
+    #   UTC 01:30–08:30 → 京/澳 09:30–16:30 工作日 —— A股/港股盘中
+    #   UTC 13:30–21:30 → 美东 09:30–17:30(夏令时)/08:30–16:30(冬令时) —— 美股盘中
+    # 门控由 push --trading-only 精确裁剪（含夏令时/冬令时、收盘后多余触发直接跳过），
+    # 所以这里宁可宽一点：cron 只保证"该在的时候在"，由脚本判断"该不该发"。
+    - cron: "30 1-8,13-21 * * 1-5"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -71,30 +75,41 @@ jobs:
           elif grep -q "❌ 没有 Text API 内容" <<< "$out"; then
             echo "::error::设备的循环/固定列表里都没有 Text API 内容 → Dot. App → 内容工坊 → 该设备 → 把「Text API」加入列表"
           fi
+          # 行情源预检：东财/新浪都取不到时本地缓存兜底（拿不到数据不会让 run 变红，
+          # 但值得一条警告——连续几天警告就该查数据源了）
+          if grep -q "行情源: " <<< "$out"; then
+            echo "::notice::行情源可用（见上方自检里的「行情源」一行）"
+          fi
 
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
 
-      - name: Push daily horoscope to Dot device
+      - name: Push index quotes to Dot device
         env:
           # 在仓库 Settings → Secrets and variables → Actions 中配置：
           #   DOT_API_KEY    Dot. App 导出的 API Key（Secret）
           #   DOT_DEVICE_ID  设备序列号（Secret 或 Variable 均可）
           DOT_API_KEY: ${{ secrets.DOT_API_KEY }}
           DOT_DEVICE_ID: ${{ secrets.DOT_DEVICE_ID || vars.DOT_DEVICE_ID }}
-          # 星座固定为狮子座；旧 ZHANGYU_SIGN 变量不再覆盖显示策略。
         run: |
+          # 定时触发必须过交易时段门控（A股/港股或美股盘中），休市时脚本自跳过（exit 0）；
+          # 手动 Run workflow 不加门控 —— 随时能看到卡片，方便验证。
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            FLAGS="--trading-only"
+          else
+            FLAGS=""
+          fi
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             python run_daily.py push --dry-run --show-payload
           else
-            python run_daily.py push --show-payload
+            python run_daily.py push --show-payload $FLAGS
           fi
 
       - name: Failure hints
         if: failure()
         run: |
           {
-            echo "### ❌ 每日推送失败"
+            echo "### ❌ 行情推送失败"
             echo ""
             echo "常见原因与处理："
             echo ""
@@ -106,6 +121,8 @@ jobs:
             echo "| 404 但列表里确实有 Text API | 设备序列号不属于这台设备，或内容加到了另一个列表（可用 --task-type fixed 指定） |"
             echo "| 推送失败：400 \`This API key is invalid\` | Key 本身无效：Dot. App 重新导出（别带引号/空格）、确认没和 \`DOT_DEVICE_ID\` 填反；本地用 \`python run_daily.py doctor --check-key\` 复现 |"
             echo "| 推送失败：403 | 该 API Key 无权操作此设备 |"
-            echo "| 只是想先看看卡片 | 重新运行本 workflow 时勾选 **dry_run**，或本地 \`python run_daily.py push --dry-run --show-payload\` |"
+            echo "| \`行情获取失败\` | 东财/新浪临时不可用且本地无缓存；重跑一次 workflow 即可（脚本会自动降级到新浪） |"
+            echo "| 定时触发显示「非交易时段…跳过」 | 正常：休市时门控放行退出（run 为绿色）。若确认在盘中仍被跳过，检查是否撞上节假日休市 |"
+            echo "| 只是想先看看卡片 | 重新运行本 workflow 时勾选 **dry_run**，或本地 \`python run_daily.py preview\` |"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::error::推送失败 — 详见本次 run 的 Summary 与上方日志"

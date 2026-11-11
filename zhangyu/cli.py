@@ -1,13 +1,17 @@
-"""章鱼AI.每日占一占 — 命令行入口。
+"""章鱼AI.行情速报 — 命令行入口。
 
 用法：
-    python run_daily.py push      [--style brief|full]  # 固定狮子座
+    python run_daily.py push      [--trading-only]   # 取最新指数行情并推送设备
                                   [--dry-run] [--show-payload] [--force]
-    python run_daily.py preview   [--fixture path.json] [--provider offline]
-    python run_daily.py signs
+                                  [--source auto|em|sina] [--fixture path.json]
+    python run_daily.py preview   [--fixture path.json] [--source em|sina]
+    python run_daily.py indices                        # 查看卡片上的指数清单
     python run_daily.py doctor    [--require-credentials]   # CI 预检用
 
     没有凭据也能自检：push --dry-run --show-payload 打印排版与请求体后正常退出。
+    定时任务（GitHub Actions 交易时段 cron）带 --trading-only：
+    A股/港股（京/澳 09:30–17:30 工作日）或美股（美东 09:30–17:30 工作日）
+    之外的触发直接跳过（退出码 0），不会打到 Dot 云。
 """
 
 from __future__ import annotations
@@ -37,8 +41,14 @@ from .dot_client import (
     text_tasks,
 )
 from .formatter import build_card
-from .providers import Fortune, get_fortune, parse_xxapi
-from .signs import Sign, get_sign, parse_sign
+from .quotes import (
+    INDEX_SPECS,
+    QuoteError,
+    QuoteSet,
+    get_quotes,
+    in_trading_window,
+    load_fixture,
+)
 
 # --------------------------------------------------------------------------- #
 # 配置
@@ -48,20 +58,21 @@ DEFAULTS: Dict[str, Any] = {
     "device_id": "",
     "title": APP_NAME,
     "brand": "章鱼AI",
-    "sign_mode": "fixed",  # 兼容保留；显示星座固定为狮子座
-    "sign": "leo",  # 旧配置中的其他星座会被覆盖
-    "style": "brief",  # brief | full
-    "max_chars": 90,
+    "source": "auto",  # auto | em（东方财富）| sina（新浪财经）
+    "fixture": None,   # 离线夹具路径（东财原始响应或归一化 JSON）
     "task_type": "loop",  # loop | fixed
     "task_key": None,  # fixed 列表项的 key（可用 doctor 查询）
     "task_alias": APP_NAME,
     "refresh_now": True,
-    "providers": ["xxapi", "freehoroscope", "offline"],
     "icon_url": None,
     "nfc_link": None,
     "timezone": "Asia/Macau",
     "state_file": "data/state.json",
+    "cache_file": "data/quotes_cache.json",
 }
+
+# 幂等窗口：50 分钟内已推送过就跳过（对应「每小时最新」的整点节奏）
+IDEMPOTENCY_MINUTES = 50
 
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -77,63 +88,46 @@ def load_config(path: Optional[str]) -> Dict[str, Any]:
     if path:
         if not config_path.exists():
             raise SystemExit(f"配置文件不存在: {config_path}")
-    elif config_path.exists():
-        pass  # 自动读取 ./config.json
     if config_path.exists():
         try:
             file_cfg = json.loads(config_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
-            raise SystemExit(f"配置文件不是合法 JSON: {config_path} ({exc})")
+            raise SystemExit(f"配置文件不是合法 JSON: {config_path} ({exc})") from exc
         cfg = _deep_merge(cfg, file_cfg)
 
     # 环境变量覆盖（密钥类只走环境变量）
     if os.environ.get("DOT_DEVICE_ID"):
         cfg["device_id"] = os.environ["DOT_DEVICE_ID"].strip()
-    # 星座是产品固定项，旧配置/环境变量的 random 或其他星座不能改变它。
-    if cfg.get("sign_mode") != "fixed" or cfg.get("sign") != "leo":
-        print("[zhangyu] 已忽略旧星座设置；卡片固定显示狮子座。", file=sys.stderr)
-    if os.environ.get("ZHANGYU_SIGN"):
-        print("[zhangyu] 已忽略 ZHANGYU_SIGN；卡片固定显示狮子座。", file=sys.stderr)
-    cfg["sign_mode"] = "fixed"
-    cfg["sign"] = "leo"
-    if os.environ.get("ZHANGYU_STYLE"):
-        cfg["style"] = os.environ["ZHANGYU_STYLE"].strip()
     if os.environ.get("ZHANGYU_TITLE"):
         cfg["title"] = os.environ["ZHANGYU_TITLE"].strip()
+    if os.environ.get("ZHANGYU_SOURCE"):
+        cfg["source"] = os.environ["ZHANGYU_SOURCE"].strip()
     return cfg
 
 
-def local_today(tz_name: str) -> dt.date:
+def local_now(tz_name: str) -> dt.datetime:
     try:
         tz = ZoneInfo(tz_name)
     except Exception:
         tz = dt.timezone(dt.timedelta(minutes=480))  # 兜底 UTC+8
         print(f"[zhangyu] 未知时区 {tz_name!r}，使用 UTC+8", file=sys.stderr)
-    return dt.datetime.now(tz).date()
+    return dt.datetime.now(tz)
 
 
-def resolve_sign(cfg: Dict[str, Any], arg: Optional[str], today: dt.date) -> Sign:
-    """固定狮子座，不再每日抽签。cfg/today/arg 保留以兼容旧调用。"""
-    leo = get_sign("leo")
-    if arg:
-        if arg.strip().lower() == "random" or parse_sign(arg).key != leo.key:
-            raise SystemExit("星座已固定为狮子座，不支持随机抽签或其他星座；请移除 --sign 或使用 --sign leo。")
-    return leo
+def load_quotes(cfg: Dict[str, Any], args) -> QuoteSet:
+    """取行情：夹具（测试/离线）优先，否则按 source 走线上链路。"""
+    fixture = getattr(args, "fixture", None) or cfg.get("fixture")
+    if fixture:
+        return load_fixture(str(fixture))
+    source = (getattr(args, "source", None) or cfg.get("source") or "auto").strip()
+    return get_quotes(
+        source=source,
+        cache_path=Path(cfg.get("cache_file") or "data/quotes_cache.json"),
+        timeout=15.0,
+    )
 
 
-def load_fortune(sign, today: dt.date, cfg: Dict[str, Any], args) -> Fortune:
-    if getattr(args, "fixture", None):
-        payload = json.loads(Path(args.fixture).read_text(encoding="utf-8"))
-        fortune = parse_xxapi(payload, sign, today)
-        fortune.source += "（fixture）"
-        return fortune
-    providers = None
-    if getattr(args, "provider", None):
-        providers = [args.provider]
-    return get_fortune(sign, today, providers=providers, timeout=15.0)
-
-
-def _print_card(card: Dict[str, Any], fortune: Fortune) -> None:
+def _print_card(card: Dict[str, Any], quoteset: QuoteSet) -> None:
     print("=" * 46)
     if card.get("title"):
         print(f"标题：{card['title']}")
@@ -141,7 +135,7 @@ def _print_card(card: Dict[str, Any], fortune: Fortune) -> None:
     print(card["message"])
     print("-" * 46)
     print(f"签名：{card['signature']}")
-    print(f"数据源：{fortune.source}")
+    print(f"数据源：{quoteset.source}（{len(quoteset.quotes)} 项）")
     print("=" * 46)
 
 
@@ -159,7 +153,7 @@ CREDENTIAL_HINT = """如何配置：
   · GitHub Actions：仓库 Settings → Secrets and variables → Actions
       Secrets：    DOT_API_KEY = dot_app_xxx
       Secrets 或 Variables：DOT_DEVICE_ID = 设备序列号（两处都支持）
-    改完后重跑 workflow（Actions → 每日占星推送 → Run workflow）。
+    改完后重跑 workflow（Actions → 行情速报推送 → Run workflow）。
   · 只想看请求体/排版而不推送：python run_daily.py push --dry-run --show-payload"""
 
 
@@ -322,12 +316,12 @@ def resolve_content_target(
     if other is not None and not explicit:
         print(
             f"[zhangyu] 提醒：{'循环' if task_type == 'loop' else '固定'}列表里没有 Text API 内容，"
-            f"但『{'固定' if other_type == 'fixed' else '循环'}列表』里有 —— 已自动改用该列表推送。",
+            f"但『{'固定' if other_type == 'loop' else '循环'}列表』有 —— 已自动改用该列表推送。",
             file=sys.stderr,
         )
         print(
             f"[zhangyu] 想固定下来：python run_daily.py push --task-type {other_type}"
-            + (f" --task-key {other.get('key')}" if other.get('key') else ""),
+            + (f" --task-key {other.get('key')}" if other.get("key") else ""),
             file=sys.stderr,
         )
         return other_type, (other.get("key") or None)
@@ -344,20 +338,30 @@ def print_payload(body: Dict[str, Any], device_id: str) -> None:
 # --------------------------------------------------------------------------- #
 # 子命令
 # --------------------------------------------------------------------------- #
-
 def cmd_push(args) -> int:
     cfg = load_config(args.config)
-    today = local_today(cfg["timezone"])
-    sign = resolve_sign(cfg, args.sign, today)
+    now = local_now(cfg["timezone"])
 
-    fortune = load_fortune(sign, today, cfg, args)
+    # 交易时段门控（定时任务专用）：休市时直接跳过，不取行情、不打 Dot 云。
+    # --dry-run 是本地预览，不受门控影响。
+    if getattr(args, "trading_only", False) and not args.dry_run:
+        window = in_trading_window(now.astimezone(dt.timezone.utc))
+        if not window:
+            print("[zhangyu] 非交易时段（A股/港股/美股均休市），跳过本次推送。")
+            return 0
+
+    try:
+        quoteset = load_quotes(cfg, args)
+    except QuoteError as exc:
+        print(f"行情获取失败：{exc}", file=sys.stderr)
+        return 1
+
     title = "" if args.no_title else cfg["title"]
     card = build_card(
-        fortune,
+        quoteset,
         title=title,
-        style=args.style or cfg["style"],
-        max_chars=int(args.max_chars or cfg["max_chars"]),
         brand=cfg.get("brand") or "章鱼AI",
+        moment=now,
     )
 
     device_id, api_key = read_credentials(cfg)
@@ -387,24 +391,36 @@ def cmd_push(args) -> int:
         print_payload(body, device_id)
 
     if args.dry_run:
-        _print_card(card, fortune)
+        _print_card(card, quoteset)
         if problems:
             print(f"[dry-run] 缺 {', '.join(problems)}；仅本地排版/请求体预览，未推送。")
         else:
             print("[dry-run] 未调用 Dot 云接口。")
         return 0
 
-    # 幂等：当天已推送过则跳过
+    # 幂等：IDEMPOTENCY_MINUTES 分钟内已推送过则跳过（每小时一更的节奏）
     state_path = Path(cfg["state_file"])
     if state_path.exists() and not args.force:
         try:
             state = json.loads(state_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             state = {}
-        if (state.get("last_push_date") == today.isoformat()
-                and state.get("sign") == sign.key):
-            print(f"[zhangyu] 今日 ({today.isoformat()}) 已推送过 {sign.cn}，跳过；如需重推加 --force")
-            return 0
+        last_at = state.get("last_push_at")
+        if last_at:
+            try:
+                last_dt = dt.datetime.fromisoformat(str(last_at))
+                if last_dt.tzinfo is None:
+                    last_dt = last_dt.replace(tzinfo=now.tzinfo)
+                age = now - last_dt.astimezone(now.tzinfo)
+                if age < dt.timedelta(minutes=IDEMPOTENCY_MINUTES):
+                    minutes = int(age.total_seconds() // 60)
+                    print(
+                        f"[zhangyu] {minutes} 分钟内已推送过，跳过；"
+                        f"如需重推加 --force"
+                    )
+                    return 0
+            except ValueError:
+                pass  # 旧格式/坏值不阻塞
 
     if problems:
         if args.show_payload:
@@ -454,9 +470,8 @@ def cmd_push(args) -> int:
         state_path.write_text(
             json.dumps(
                 {
-                    "last_push_date": today.isoformat(),
-                    "sign": sign.key,
-                    "source": fortune.source,
+                    "last_push_at": now.isoformat(timespec="seconds"),
+                    "source": quoteset.source,
                     "title": card["title"],
                     "message": card["message"],
                     "device_message": message,
@@ -474,7 +489,7 @@ def cmd_push(args) -> int:
 
     for line in form_notes:
         print(f"[zhangyu] {line}")
-    _print_card(card, fortune)
+    _print_card(card, quoteset)
     print(f"✅ 已推送 → 设备 {device_id}")
     print(f"Dot 云返回：{message}")
     return 0
@@ -482,38 +497,43 @@ def cmd_push(args) -> int:
 
 def cmd_preview(args) -> int:
     cfg = load_config(args.config)
-    today = local_today(cfg["timezone"])
-    sign = resolve_sign(cfg, args.sign, today)
-    fortune = load_fortune(sign, today, cfg, args)
+    now = local_now(cfg["timezone"])
+    try:
+        quoteset = load_quotes(cfg, args)
+    except QuoteError as exc:
+        print(f"行情获取失败：{exc}", file=sys.stderr)
+        return 1
     title = "" if args.no_title else (args.title or cfg["title"])
     card = build_card(
-        fortune,
+        quoteset,
         title=title,
-        style=args.style or cfg["style"],
-        max_chars=int(args.max_chars or cfg["max_chars"]),
         brand=cfg.get("brand") or "章鱼AI",
+        moment=now,
     )
-    _print_card(card, fortune)
+    _print_card(card, quoteset)
     if args.json:
         print(json.dumps(card, ensure_ascii=False, indent=2))
     return 0
 
 
-def cmd_signs(_args) -> int:
-    print(f"{'key':<12}{'中文名':<8}{'符号':<4}日期范围")
-    print("-" * 40)
-    s = get_sign("leo")
-    print(f"{s.key:<12}{s.cn:<8}{s.symbol:<4}{s.date_range}")
-    print("\n本项目固定显示狮子座，不再每日抽签。")
+def cmd_indices(_args) -> int:
+    print(f"{'键':<8}{'分组':<6}{'显示名':<10}{'东财 secid':<14}新浪代码")
+    print("-" * 56)
+    for spec in INDEX_SPECS:
+        print(f"{spec.key:<8}{spec.group:<6}{spec.label:<10}{spec.em:<14}{spec.sina}")
+    print(f"\n共 {len(INDEX_SPECS)} 项，分 A股 / 港股 / 美股 三组显示在卡片上。")
     return 0
 
 
 def cmd_doctor(args) -> int:
-    """自检：配置、凭据、数据源、（可选）固定列表查询。"""
+    """自检：配置、凭据、行情源、（可选）固定列表查询。"""
     cfg = load_config(args.config)
-    today = local_today(cfg["timezone"])
+    now = local_now(cfg["timezone"])
     print(f"{APP_NAME} v{__version__} 自检")
-    print(f"- 今天({cfg['timezone']}): {today.isoformat()}")
+    print(f"- 今天({cfg['timezone']}): {now:%Y-%m-%d %H:%M} 星期"
+          f"{'一二三四五六日'[now.weekday()]}")
+    window = in_trading_window(now.astimezone(dt.timezone.utc))
+    print(f"- 交易时段: {'是（' + window + '）✅' if window else '否（休市，定时任务会跳过）'}")
     device_id, api_key = read_credentials(cfg)
     problems = missing_credentials(device_id, api_key)
     if "device_id" in problems:
@@ -530,7 +550,7 @@ def cmd_doctor(args) -> int:
             print(f"    · 提示（不影响使用，服务端会以实际形态验证）: {item}")
     if swapped_secrets(device_id, api_key):
         print(
-            "    · ⚠️ device_id 看起来是 API Key —— 两个 Secret 可能填反了"
+            "    · ⚠️ device_id 看起来是 API Key —— 两个 Secret 很可能填反了"
             "（DOT_DEVICE_ID=设备序列号，DOT_API_KEY=dot_app_…）"
         )
     if problems and getattr(args, "require_credentials", False):
@@ -591,17 +611,16 @@ def cmd_doctor(args) -> int:
             if target is None and not lists["errors"]:
                 content_missing_hint(str(cfg.get("task_type") or "loop"), "")
 
-    print(f"- sign_mode: {cfg['sign_mode']}  style: {cfg['style']}  task_type: {cfg['task_type']}")
-
-    sign = resolve_sign(cfg, None, today)
-    print(f"- 显示星座: {sign.cn} ({sign.key}，固定)")
+    print(f"- source: {cfg['source']}  task_type: {cfg['task_type']}")
     try:
-        fortune = get_fortune(sign, today, providers=cfg.get("providers"), timeout=10.0)
-        print(f"- 数据源: {fortune.source} ✅")
-        card = build_card(fortune, title=cfg["title"], style=cfg["style"], max_chars=int(cfg["max_chars"]))
-        print(f"- 卡片排版: ✅（message {len(card['message'])} 字）")
+        quoteset = load_quotes(cfg, args)
+        card = build_card(quoteset, title=cfg["title"],
+                          brand=cfg.get("brand") or "章鱼AI", moment=now)
+        lines = card["message"].count("\n") + 1
+        print(f"- 行情源: {quoteset.source} ✅（{len(quoteset.quotes)} 项）")
+        print(f"- 卡片排版: ✅（message {lines} 行）")
     except Exception as exc:  # 自检不因异常中断
-        print(f"- 数据源/排版: ❌ {exc}")
+        print(f"- 行情源/排版: ❌ {exc}")
     return 0
 
 
@@ -611,22 +630,22 @@ def cmd_doctor(args) -> int:
 
 def _add_common(sp: argparse.ArgumentParser) -> None:
     sp.add_argument("--config", help="配置文件路径（默认 ./config.json，不存在则用内置默认值）")
-    sp.add_argument("--sign", help="兼容旧命令，仅接受 leo / 狮子座 / 獅子座 / ♌；固定显示狮子座")
-    sp.add_argument("--style", choices=["brief", "full"], help="卡片样式（覆盖配置）")
-    sp.add_argument("--max-chars", dest="max_chars", type=int, help="综合运势最大字数（覆盖配置）")
-    sp.add_argument("--fixture", help="使用本地 xxapi 响应 JSON 文件（离线调试）")
+    sp.add_argument("--fixture", help="使用本地行情 JSON 文件（东财原始响应或归一化格式，离线调试）")
+    sp.add_argument("--source", choices=["auto", "em", "sina"],
+                    help="行情数据源：auto=东财→新浪→缓存（覆盖配置）")
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="zhangyu", description=f"{APP_NAME} — 每日占星运程推送")
+    parser = argparse.ArgumentParser(prog="zhangyu", description=f"{APP_NAME} — 指数行情推送")
     parser.add_argument("--version", action="version", version=f"{APP_NAME} v{__version__}")
     sub = parser.add_subparsers(dest="command")
 
-    p_push = sub.add_parser("push", help="获取今日运势并推送到 Dot 设备（默认命令）")
+    p_push = sub.add_parser("push", help="获取最新指数行情并推送到 Dot 设备（默认命令）")
     _add_common(p_push)
     p_push.add_argument("--dry-run", action="store_true", help="只打印卡片，不调用 Dot 云接口")
-    p_push.add_argument("--force", action="store_true", help="忽略当天已推送状态，强制重推")
-    p_push.add_argument("--provider", help="指定数据源：xxapi | freehoroscope | offline")
+    p_push.add_argument("--force", action="store_true", help="忽略最近推送状态，强制重推")
+    p_push.add_argument("--trading-only", dest="trading_only", action="store_true",
+                        help="仅交易时段（A股/港股或美股盘中）才推送，休市跳过（定时任务用）")
     p_push.add_argument("--task-type", dest="task_type", choices=["loop", "fixed"], help="覆盖配置")
     p_push.add_argument("--task-key", dest="task_key", help="fixed 列表项 key（覆盖配置）")
     p_push.add_argument("--timeout", type=float, default=20.0, help="Dot 接口超时秒数")
@@ -639,7 +658,6 @@ def main(argv=None) -> int:
 
     p_preview = sub.add_parser("preview", help="只排版预览卡片（不推送）")
     _add_common(p_preview)
-    p_preview.add_argument("--provider", help="指定数据源：xxapi | freehoroscope | offline")
     p_preview.add_argument("--title", help="覆盖卡片标题")
     p_preview.add_argument(
         "--no-title",
@@ -648,10 +666,13 @@ def main(argv=None) -> int:
     )
     p_preview.add_argument("--json", action="store_true", help="额外输出 JSON 形式的卡片")
 
-    sub.add_parser("signs", help="显示固定星座（狮子座）")
+    p_indices = sub.add_parser("indices", help="查看卡片上的指数清单（10 项 / 三组）")
+    p_indices.add_argument("--config", help=argparse.SUPPRESS)  # 与其它子命令保持一致
 
     p_doctor = sub.add_parser("doctor", help="环境自检")
     p_doctor.add_argument("--config", help="配置文件路径")
+    p_doctor.add_argument("--fixture", help="离线行情夹具（与 preview 相同）")
+    p_doctor.add_argument("--source", choices=["auto", "em", "sina"], help="覆盖配置的数据源")
     p_doctor.add_argument(
         "--require-credentials",
         dest="require_credentials",
@@ -671,14 +692,18 @@ def main(argv=None) -> int:
         help="查询设备的循环/固定列表，确认已添加 Text API 内容（推送 404 的根因）",
     )
 
-    args = parser.parse_args(argv)
-    command = args.command or "push"
+    raw = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw)
+    if args.command is None:
+        # 裸调用等价于 push（顶层没有可解析的业务参数，直接按 push 重解析）
+        args = parser.parse_args(["push"])
+    command = args.command
     if command == "push":
         return cmd_push(args)
     if command == "preview":
         return cmd_preview(args)
-    if command == "signs":
-        return cmd_signs(args)
+    if command == "indices":
+        return cmd_indices(args)
     if command == "doctor":
         return cmd_doctor(args)
     parser.print_help()
